@@ -1,234 +1,111 @@
 <?php
-session_start();
-include('db-config.php'); 
+// session_start(); // Enable if using sessions
+require_once('db.php'); // Use PDO connection
 
-// Ensure only staff/hod/admin can access
-$allowed_roles = ['staff', 'hod', 'admin', 'principal'];
-if (!isset($_SESSION['role']) || !in_array($_SESSION['role'], $allowed_roles)) {
+// --- Security Check (Placeholder) ---
+/*
+if (!isset($_SESSION['role']) || $_SESSION['role'] !== 'staff') { // Assuming staff or admin
     header("Location: login.php");
     exit;
 }
-$staff_id = $_SESSION['user_id']; // Logged in staff member
+*/
 
-// Determine the correct dashboard link based on role
-$dashboard_link = match ($_SESSION['role']) {
-    'admin' => 'admin_dashboard.php',
-    'staff' => 'staff_dashboard.php',
-    'hod' => 'hod_dashboard.php',    
-    'principal' => 'principal_dashboard.php', 
-    default => 'login.php', // Fallback
-};
+$message = ''; // For success/error messages
 
-$semesters = range(1, 8);
-$allocated_subjects = []; // Subjects allocated to this staff for the selected semester
-$question_papers = []; // Papers created by this staff for the selected subject
-$students = [];
-$message = "";
-$message_type = "error";
-$selected_semester = filter_input(INPUT_GET, 'semester', FILTER_VALIDATE_INT); // Get selected semester from URL
+// Handle form submission
+if ($_SERVER["REQUEST_METHOD"] == "POST") {
+    $class_id = filter_input(INPUT_POST, 'class_id', FILTER_VALIDATE_INT);
+    $qp_id = filter_input(INPUT_POST, 'qp_id', FILTER_VALIDATE_INT);
 
-try {
-    // Fetch all students (consider filtering later)
-    $stmt_students = $conn->prepare("SELECT id, name, usn FROM students ORDER BY name");
-    $stmt_students->execute();
-    $students = $stmt_students->fetchAll(PDO::FETCH_ASSOC);
-
-    // If a semester is selected, fetch allocated subjects for this staff
-    if ($selected_semester) {
-        $stmt_subjects = $conn->prepare("
-            SELECT s.id, s.name, s.subject_code 
-            FROM subjects s
-            JOIN subject_allocation sa ON s.id = sa.subject_id
-            WHERE sa.staff_id = ? AND s.semester = ?
-            ORDER BY s.name
-        ");
-        $stmt_subjects->execute([$staff_id, $selected_semester]);
-        $allocated_subjects = $stmt_subjects->fetchAll(PDO::FETCH_ASSOC);
-        
-        // Fetch question papers created by this staff for the allocated subjects of this semester
-        if (!empty($allocated_subjects)) {
-             $subject_ids = array_column($allocated_subjects, 'id');
-             $placeholders = implode(',', array_fill(0, count($subject_ids), '?')); // Creates ?,?,?
-             
-             $stmt_qp = $conn->prepare("
-                 SELECT qp.id, qp.title, s.name as subject_name 
-                 FROM question_papers qp 
-                 JOIN subjects s ON qp.subject_id = s.id
-                 WHERE qp.staff_id = ? AND qp.subject_id IN ($placeholders)
-                 ORDER BY qp.title
-             ");
-             // Parameters: staff_id first, then the array of subject IDs
-             $params = array_merge([$staff_id], $subject_ids);
-             $stmt_qp->execute($params);
-             $question_papers = $stmt_qp->fetchAll(PDO::FETCH_ASSOC);
-        }
-    }
-
-
-    // Handle form submission
-    if ($_SERVER['REQUEST_METHOD'] == 'POST') {
-        $paper_id = filter_input(INPUT_POST, 'question_paper_id', FILTER_VALIDATE_INT);
-        $student_ids = $_POST['student_ids'] ?? []; // Array of student IDs
-        $start_time_str = trim($_POST['start_time'] ?? '');
-        $end_time_str = trim($_POST['end_time'] ?? '');
-        
-        // Convert local datetime strings to UTC timestamps for DB
-        $start_time = !empty($start_time_str) ? date('Y-m-d H:i:s', strtotime($start_time_str)) : null;
-        $end_time = !empty($end_time_str) ? date('Y-m-d H:i:s', strtotime($end_time_str)) : null;
-
-
-        if (!$paper_id || empty($student_ids)) {
-            $message = "Please select a question paper and at least one student.";
-        } elseif ($start_time && $end_time && $start_time >= $end_time) {
-             $message = "End time must be after the start time.";
-        } else {
-            $conn->beginTransaction();
-            // Added start_time, end_time
-            $sql = "INSERT INTO assigned_tests (question_paper_id, student_id, assigned_by_staff_id, start_time, end_time, status) 
-                    VALUES (?, ?, ?, ?, ?, 'assigned') 
-                    ON CONFLICT (question_paper_id, student_id) DO NOTHING"; // Prevent duplicates
-            $stmt_assign = $conn->prepare($sql);
-            $assigned_count = 0;
-
-            foreach ($student_ids as $student_id) {
-                $student_id_int = filter_var($student_id, FILTER_VALIDATE_INT);
-                if ($student_id_int) {
-                    // Pass start_time and end_time to execute
-                    if ($stmt_assign->execute([$paper_id, $student_id_int, $staff_id, $start_time, $end_time])) {
-                         $assigned_count += $stmt_assign->rowCount(); 
-                    }
-                }
-            }
-            $conn->commit();
+    if ($class_id && $qp_id) {
+        try {
+            // PostgreSQL-compatible query to insert if not already exists
+            $sql = "INSERT INTO test_allocation (class_id, qp_id) 
+                    VALUES (:class_id, :qp_id) 
+                    ON CONFLICT (class_id, qp_id) DO NOTHING";
             
-            if ($assigned_count > 0) {
-                 $message = "Test assigned successfully to " . $assigned_count . " student(s).";
-                 $message_type = "success";
+            $stmt = $pdo->prepare($sql);
+            $stmt->execute([':class_id' => $class_id, ':qp_id' => $qp_id]);
+
+            if ($stmt->rowCount() > 0) {
+                $message = "<p class='message success'>Test allocated successfully!</p>";
             } else {
-                 $message = "No new assignments made. Students may have already been assigned this test.";
-                 $message_type = "error"; 
+                $message = "<p class='message error'>This test is already allocated to this class.</p>";
             }
-            // Reset selected semester to refresh subject/paper lists if needed
-             $selected_semester = null; 
-             $allocated_subjects = [];
-             $question_papers = [];
+        } catch (PDOException $e) {
+            $message = "<p class='message error'>Database error: " . $e->getMessage() . "</p>";
         }
+    } else {
+        $message = "<p class='message error'>Invalid input. Please select a class and a question paper.</p>";
     }
+}
+
+// Fetch classes and question papers for the dropdowns
+try {
+    $class_stmt = $pdo->query("SELECT id, name FROM classes ORDER BY name");
+    $classes = $class_stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $qp_stmt = $pdo->query("SELECT id, title FROM question_papers ORDER BY title");
+    $question_papers = $qp_stmt->fetchAll(PDO::FETCH_ASSOC);
 
 } catch (PDOException $e) {
-    if ($conn->inTransaction()) {
-        $conn->rollBack();
-    }
-    $message = "Database Error: " . $e->getMessage();
+    die("Error fetching data: " . $e->getMessage());
 }
 ?>
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    <title>Assign Test to Class</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Assign Test</title>
     <style>
-        /* Consistent Styling */
-        body { font-family: Arial, sans-serif; margin: 0; padding: 0; background-color: #f4f4f9; color: #333; }
-        .navbar { background-color: #007bff; padding: 1em; display: flex; justify-content: flex-end; gap: 1em; }
-        .navbar a { color: #fff; text-decoration: none; padding: 0.5em 1em; border-radius: 5px; transition: background-color 0.3s ease; }
-        .navbar a:hover { background-color: #0056b3; }
-        .container { width: 90%; max-width: 800px; margin: 20px auto; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
-        h2 { color: #444; text-align: center; margin-bottom: 25px;}
-        form { display: flex; flex-direction: column; gap: 15px; }
-        label { font-weight: bold; color: #555; }
-        input, select, button { width: 100%; padding: 10px; border-radius: 4px; font-size: 16px; box-sizing: border-box; border: 1px solid #ddd; }
-        select[multiple] { height: 150px; } 
-        button { background-color: #28a745; color: white; cursor: pointer; border: none; transition: background-color 0.3s ease; font-weight: bold; margin-top: 10px; }
-        button:hover { background-color: #218838; }
-        .message { padding: 15px; margin-bottom: 20px; border-radius: 5px; text-align: center; border: 1px solid transparent; }
-        .message.success { background-color: #d4edda; color: #155724; border-color: #c3e6cb; }
-        .message.error { background-color: #f8d7da; color: #721c24; border-color: #f5c6cb; }
-        .back-link { display: block; margin-top: 20px; text-align: center; color: #007bff; }
-        .form-row { display: flex; gap: 15px; align-items: flex-end; }
-        .form-row label, .form-row select, .form-row button { margin-bottom: 0; }
-        .form-row > div { flex: 1; } /* Make elements share space */
+        /* Reusing styles from admin.php */
+        :root { --space-cadet: #2b2d42; --cool-gray: #8d99ae; --antiflash-white: #edf2f4; --red-pantone: #ef233c; --fire-engine-red: #d90429; }
+        body { font-family: 'Segoe UI', sans-serif; margin: 0; padding: 20px; background: var(--space-cadet); color: var(--antiflash-white); }
+        .back-link { display: block; max-width: 860px; margin: 0 auto 20px auto; text-align: right; font-weight: bold; color: var(--antiflash-white); text-decoration: none; }
+        .back-link:hover { text-decoration: underline; }
+        .container { max-width: 600px; margin: 20px auto; padding: 30px; background: rgba(141, 153, 174, 0.1); border-radius: 15px; border: 1px solid rgba(141, 153, 174, 0.2); }
+        h2 { text-align: center; margin-bottom: 20px; }
+        form { display: flex; flex-direction: column; gap: 10px; }
+        label { display: block; margin-bottom: 5px; font-weight: 600; }
+        select { width: 100%; padding: 10px; margin-bottom: 10px; border-radius: 5px; border: 1px solid var(--cool-gray); background: rgba(43, 45, 66, 0.5); color: var(--antiflash-white); box-sizing: border-box; }
+        button { padding: 12px 20px; border: none; border-radius: 5px; background-color: var(--fire-engine-red); color: var(--antiflash-white); font-weight: bold; cursor: pointer; width: 100%; font-size: 1.1em; margin-top: 10px; }
+        button:hover { background-color: var(--red-pantone); }
+        .message { padding: 10px; border-radius: 5px; margin-bottom: 1em; text-align: center; font-weight: bold; }
+        .success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
     </style>
-    <script>
-        // Function to reload page with selected semester
-        function filterBySemester() {
-            const semesterSelect = document.getElementById('semester');
-            const selectedSemester = semesterSelect.value;
-            if (selectedSemester) {
-                window.location.href = 'assign-test.php?semester=' + selectedSemester;
-            } else {
-                 window.location.href = 'assign-test.php'; // Clear selection
-            }
-        }
-    </script>
 </head>
 <body>
-    <div class="navbar">
-        <a href="<?= htmlspecialchars($dashboard_link) ?>">Back to Dashboard</a>
-        <a href="logout.php">Logout</a>
-    </div>
-
+    <a href="/admin" class="back-link">&laquo; Back to Admin Dashboard</a>
     <div class="container">
-        <h2>Assign Test to Students</h2>
+        <h2>Assign Test to Class</h2>
+        <?php if (!empty($message)) echo $message; ?>
 
-        <?php if (!empty($message)) { echo "<div class='message " . htmlspecialchars($message_type) . "'>" . htmlspecialchars($message) . "</div>"; } ?>
-
-         <!-- Semester Selection -->
-         <div class="form-row">
-             <div>
-                <label for="semester">1. Select Semester to Filter Subjects:</label>
-                <select name="semester" id="semester" onchange="filterBySemester()">
-                    <option value="">-- Select Semester --</option>
-                    <?php foreach ($semesters as $sem): ?>
-                        <option value="<?= $sem ?>" <?= ($selected_semester == $sem) ? 'selected' : '' ?>>Semester <?= $sem ?></option>
-                    <?php endforeach; ?>
-                </select>
-             </div>
-             <!-- Optional: Add a button if needed, or rely on onchange -->
-             <!-- <button type="button" onclick="filterBySemester()">Filter Subjects</button> -->
-         </div>
-         
-         <hr style="margin: 20px 0;">
-
-        <form action="assign-test.php<?= $selected_semester ? '?semester='.$selected_semester : '' ?>" method="POST">
-             <!-- Hidden field to keep track of semester during POST -->
-             <input type="hidden" name="selected_semester_post" value="<?= htmlspecialchars($selected_semester ?? '') ?>">
-
-            <label for="question_paper_id">2. Select Question Paper:</label>
-            <select name="question_paper_id" id="question_paper_id" required <?= !$selected_semester ? 'disabled' : '' ?>>
-                <option value="" disabled selected>-- Select a Paper (Filter by Semester First) --</option>
-                <?php foreach ($question_papers as $paper): ?>
-                    <option value="<?= $paper['id'] ?>"><?= htmlspecialchars($paper['title'] . ' - ' . $paper['subject_name']) ?></option>
+        <form action="assign-test.php" method="POST">
+            <label for="class_id">Select Class:</label>
+            <select name="class_id" id="class_id" required>
+                <option value="">-- Select a Class --</option>
+                <?php foreach ($classes as $class): ?>
+                    <option value="<?= htmlspecialchars($class['id']) ?>">
+                        <?= htmlspecialchars($class['name']) ?>
+                    </option>
                 <?php endforeach; ?>
-                 <?php if ($selected_semester && empty($question_papers)): ?>
-                    <option value="" disabled>No question papers found for your allocated subjects in this semester.</option>
-                 <?php endif; ?>
-                 <?php if (!$selected_semester): ?>
-                     <option value="" disabled>Select a semester above first.</option>
-                 <?php endif; ?>
             </select>
 
-            <label for="student_ids">3. Select Student(s): (Hold Ctrl/Cmd to select multiple)</label>
-            <select name="student_ids[]" id="student_ids" multiple required size="8">
-                <?php foreach ($students as $student): ?>
-                    <option value="<?= $student['id'] ?>"><?= htmlspecialchars($student['name'] . ' (' . $student['usn'] . ')') ?></option>
+            <label for="qp_id">Select Question Paper:</label>
+            <select name="qp_id" id="qp_id" required>
+                <option value="">-- Select a Question Paper --</option>
+                <?php foreach ($question_papers as $qp): ?>
+                    <option value="<?= htmlspecialchars($qp['id']) ?>">
+                        <?= htmlspecialchars($qp['title']) ?>
+                    </option>
                 <?php endforeach; ?>
-                 <?php if (empty($students)): ?>
-                    <option value="" disabled>No students found in the system.</option>
-                <?php endif; ?>
             </select>
-            
-            <label for="start_time">4. Available From (Optional):</label>
-            <input type="datetime-local" id="start_time" name="start_time">
-            
-            <label for="end_time">5. Due By (Optional):</label>
-            <input type="datetime-local" id="end_time" name="end_time">
 
-
-            <button type="submit" <?= !$selected_semester || empty($question_papers) ? 'disabled' : '' ?>>Assign Test</button>
+            <button type="submit">Assign Test</button>
         </form>
-         <a href="<?= htmlspecialchars($dashboard_link) ?>" class="back-link">Cancel</a>
     </div>
 </body>
 </html>
