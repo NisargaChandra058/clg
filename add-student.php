@@ -1,60 +1,90 @@
 <?php
 session_start();
-require_once 'db.php'; // uses PDO $pdo
+require_once('db.php'); // this gives you $pdo (PostgreSQL PDO connection)
 
-// Restrict access to admin only
+// only admin can access
 if (!isset($_SESSION['role']) || $_SESSION['role'] !== 'admin') {
     header("Location: login.php");
     exit;
 }
 
-$message = "";
+$message = '';
 
-// Handle CSV upload
+// ---------- HANDLE CSV UPLOAD ----------
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['student_csv'])) {
-    $fileTmp = $_FILES['student_csv']['tmp_name'];
+    $fileName = $_FILES['student_csv']['tmp_name'];
 
     if ($_FILES['student_csv']['size'] > 0) {
-        $file = fopen($fileTmp, "r");
+        $file = fopen($fileName, "r");
+        $stmt = $pdo->prepare("
+            INSERT INTO students (usn, student_name, email, password, dob, allotted_branch_management)
+            VALUES (:usn, :student_name, :email, :password, :dob, :branch)
+        ");
 
-        // Skip header if present
-        $header = fgetcsv($file);
-
-        $insertSQL = "
-            INSERT INTO students (usn, student_name, email, dob, semester, password)
-            VALUES (:usn, :student_name, :email, :dob, :semester, :password)
-            ON CONFLICT (usn) DO NOTHING
-        ";
-        $stmt = $pdo->prepare($insertSQL);
-
-        $count = 0;
-
+        $rowCount = 0;
         while (($data = fgetcsv($file, 1000, ",")) !== FALSE) {
-            // Expected columns: USN, Name, Email, DOB, Semester, Password
-            $usn = trim($data[0] ?? '');
-            $name = trim($data[1] ?? '');
-            $email = trim($data[2] ?? '');
-            $dob = !empty($data[3]) ? date('Y-m-d', strtotime($data[3])) : null;
-            $semester = (int)($data[4] ?? 1);
-            $password = !empty($data[5]) ? password_hash($data[5], PASSWORD_DEFAULT) : password_hash('123456', PASSWORD_DEFAULT);
+            if ($rowCount === 0) { // skip header if present
+                $rowCount++;
+                continue;
+            }
+            $usn = trim($data[0]);
+            $name = trim($data[1]);
+            $email = trim($data[2]);
+            $dob = !empty($data[3]) ? $data[3] : null;
+            $branch = trim($data[4]);
+            $password = password_hash($data[5], PASSWORD_DEFAULT);
 
-            if ($usn && $name && $email) {
+            if (!empty($usn) && !empty($name) && !empty($email)) {
                 $stmt->execute([
                     ':usn' => $usn,
                     ':student_name' => $name,
                     ':email' => $email,
+                    ':password' => $password,
                     ':dob' => $dob,
-                    ':semester' => $semester,
-                    ':password' => $password
+                    ':branch' => $branch
                 ]);
-                $count++;
             }
+            $rowCount++;
         }
-
         fclose($file);
-        $message = "✅ Successfully added $count students!";
+        $message = "<p class='success-message'>✅ $rowCount students imported successfully!</p>";
     } else {
-        $message = "⚠️ Please upload a valid CSV file.";
+        $message = "<p class='error-message'>❌ Please upload a valid CSV file.</p>";
+    }
+}
+
+// ---------- HANDLE MANUAL STUDENT ADD ----------
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['usn'])) {
+    $usn       = trim($_POST['usn'] ?? '');
+    $name      = trim($_POST['name'] ?? '');
+    $email     = trim($_POST['email'] ?? '');
+    $dob       = $_POST['dob'] ?? null;
+    $address   = trim($_POST['address'] ?? '');
+    $branch    = trim($_POST['branch'] ?? '');
+    $semester  = (int)($_POST['semester'] ?? 1);
+    $password  = password_hash($_POST['password'] ?? '', PASSWORD_DEFAULT);
+
+    if ($usn && $name && $email) {
+        try {
+            $stmt = $pdo->prepare("
+                INSERT INTO students (usn, student_name, email, password, dob, semester, allotted_branch_management)
+                VALUES (:usn, :name, :email, :password, :dob, :semester, :branch)
+            ");
+            $stmt->execute([
+                ':usn'      => $usn,
+                ':name'     => $name,
+                ':email'    => $email,
+                ':password' => $password,
+                ':dob'      => $dob,
+                ':semester' => $semester,
+                ':branch'   => $branch
+            ]);
+            $message = "<p class='success-message'>✅ Student added successfully!</p>";
+        } catch (PDOException $e) {
+            $message = "<p class='error-message'>❌ Database error: " . htmlspecialchars($e->getMessage()) . "</p>";
+        }
+    } else {
+        $message = "<p class='error-message'>❌ Please fill all required fields.</p>";
     }
 }
 ?>
@@ -63,92 +93,68 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['student_csv'])) {
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Add Students</title>
+<title>Add Student</title>
 <style>
-body {
-    font-family: Arial, sans-serif;
-    background-color: #f4f4f9;
-    margin: 0; padding: 0;
-}
-.navbar {
-    background: #333; color: #fff; padding: 10px;
-    text-align: center;
-}
-.navbar a { color: #fff; text-decoration: none; margin: 0 10px; }
-.content {
-    width: 85%; margin: 30px auto;
-    background: #fff; padding: 25px;
-    border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-}
-h2 { text-align: center; color: #333; }
-form { display: flex; flex-direction: column; align-items: center; }
-input, select, textarea, button {
-    width: 80%; max-width: 400px; padding: 10px; margin: 8px 0;
-    border: 1px solid #ccc; border-radius: 5px;
-}
-button {
-    background: #4CAF50; color: #fff; border: none; cursor: pointer;
-}
-button:hover { background: #45a049; }
-.message {
-    text-align: center; font-weight: bold; color: #155724;
-    background: #d4edda; border: 1px solid #c3e6cb;
-    padding: 10px; border-radius: 5px; margin-bottom: 15px;
-}
+    body { font-family: Arial; background: #f4f7fc; }
+    .content { width: 85%; margin: 30px auto; background: white; padding: 25px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+    .navbar { background: #333; padding: 10px; text-align: right; }
+    .navbar a { color: white; text-decoration: none; margin: 0 10px; }
+    h2 { text-align: center; }
+    form { text-align: center; margin-top: 15px; }
+    input, select, textarea, button { width: 80%; max-width: 400px; padding: 10px; margin: 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 16px; }
+    button { background: #28a745; color: white; cursor: pointer; border: none; }
+    button:hover { background: #218838; }
+    .success-message { background: #d4edda; color: #155724; padding: 10px; border-radius: 4px; }
+    .error-message { background: #f8d7da; color: #721c24; padding: 10px; border-radius: 4px; }
 </style>
 </head>
 <body>
 
 <div class="navbar">
-    <a href="admin-panel.php">← Back to Dashboard</a>
+    <a href="admin-panel.php">Back to Admin Panel</a>
 </div>
 
 <div class="content">
     <h2>Add Students</h2>
+    <?= $message ?>
 
-    <?php if (!empty($message)) echo "<p class='message'>$message</p>"; ?>
-
-    <h3>📂 Upload CSV (Bulk)</h3>
-    <form action="add-student.php" method="POST" enctype="multipart/form-data">
-        <input type="file" name="student_csv" accept=".csv" required>
-        <button type="submit">Upload</button>
-        <button type="button" onclick="downloadSample()">Download Sample CSV</button>
+    <h3>📁 Upload CSV File</h3>
+    <form method="POST" enctype="multipart/form-data">
+        <input type="file" name="student_csv" accept=".csv" required><br>
+        <button type="submit">Upload CSV</button>
     </form>
 
-    <h3>👤 Add Student Manually</h3>
-    <form action="manual-add-student.php" method="POST">
-        <input type="text" name="usn" placeholder="USN" required>
-        <input type="text" name="name" placeholder="Full Name" required>
-        <input type="email" name="email" placeholder="Email" required>
-        <input type="date" name="dob" required>
+    <hr>
 
-        <!-- Semester -->
+    <h3>✏️ Manually Add a Student</h3>
+    <form method="POST">
+        <input type="text" name="usn" placeholder="USN" required><br>
+        <input type="text" name="name" placeholder="Full Name" required><br>
+        <input type="email" name="email" placeholder="Email" required><br>
+        <input type="date" name="dob"><br>
+        <textarea name="address" placeholder="Address"></textarea><br>
+
+        <label>Branch:</label>
+        <select name="branch" required>
+            <option value="CSE">CSE</option>
+            <option value="ECE">ECE</option>
+            <option value="MECH">MECH</option>
+            <option value="CIVIL">CIVIL</option>
+        </select><br>
+
+        <label>Semester:</label>
         <select name="semester" required>
-            <option value="">-- Select Semester --</option>
             <?php
-            // Fetch semesters dynamically from DB
             $semesters = $pdo->query("SELECT id, name FROM semesters ORDER BY id")->fetchAll(PDO::FETCH_ASSOC);
             foreach ($semesters as $sem) {
                 echo "<option value='{$sem['id']}'>{$sem['name']}</option>";
             }
             ?>
-        </select>
+        </select><br>
 
-        <input type="password" name="password" placeholder="Password" required>
+        <input type="password" name="password" placeholder="Password" required><br>
         <button type="submit">Add Student</button>
     </form>
 </div>
-
-<script>
-function downloadSample() {
-    const csvContent = "USN,Name,Email,DOB,Semester,Password\n1RV23CS001,John Doe,john@example.com,2004-06-12,3,123456";
-    const blob = new Blob([csvContent], { type: "text/csv" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = "sample_students.csv";
-    a.click();
-}
-</script>
 </body>
 </html>
