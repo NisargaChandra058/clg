@@ -12,22 +12,28 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
         try {
             $pdo->beginTransaction();
 
-            // Example: assign subject/test to selected students
+            // Correct SQL: Insert into the new student_subject_allocation table
             $stmt = $pdo->prepare("
-                INSERT INTO test_allocation (class_id, qp_id)
+                INSERT INTO student_subject_allocation (student_id, subject_id)
                 VALUES (:student_id, :subject_id)
-                ON CONFLICT DO NOTHING
+                ON CONFLICT (student_id, subject_id) DO NOTHING
             ");
 
+            $assigned_count = 0;
             foreach ($selected_students as $student_id) {
-                $stmt->execute([
-                    ':student_id' => $student_id,
-                    ':subject_id' => $subject_id
-                ]);
+                if (filter_var($student_id, FILTER_VALIDATE_INT)) {
+                    $stmt->execute([
+                        ':student_id' => $student_id,
+                        ':subject_id' => $subject_id
+                    ]);
+                    if ($stmt->rowCount() > 0) {
+                        $assigned_count++;
+                    }
+                }
             }
 
             $pdo->commit();
-            $message = "<p class='message success'>Assigned successfully to selected students!</p>";
+            $message = "<p class='message success'>Assigned subject to $assigned_count new student(s)!</p>";
         } catch (PDOException $e) {
             $pdo->rollBack();
             $message = "<p class='message error'>Database error: " . htmlspecialchars($e->getMessage()) . "</p>";
@@ -41,25 +47,23 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
 try {
     $semesters = $pdo->query("SELECT id, name FROM semesters ORDER BY name")->fetchAll(PDO::FETCH_ASSOC);
 
-    // Fetch subjects by semester
-    $subjects_stmt = $pdo->query("SELECT id, name, semester_id FROM subjects ORDER BY name");
+    // Correct SQL: Fetch subjects based on 'semester_id'
+    $subjects_stmt = $pdo->query("SELECT id, name, subject_code, semester_id FROM subjects ORDER BY name");
     $subjects_by_semester = [];
     while ($subject = $subjects_stmt->fetch(PDO::FETCH_ASSOC)) {
         $subjects_by_semester[$subject['semester_id']][] = $subject;
     }
 
-    // Fetch students by semester
-    // Ensure your students table has semester_id or join via classes
+    // Correct SQL: Fetch students based on their 'semester' column
     $students_stmt = $pdo->query("
-        SELECT s.id, s.student_name, c.semester_id
-        FROM students s
-        JOIN classes c ON c.id = s.class_id
-        WHERE c.semester_id IS NOT NULL
-        ORDER BY s.student_name
+        SELECT id, student_name, semester
+        FROM students
+        WHERE semester IS NOT NULL
+        ORDER BY student_name
     ");
     $students_by_semester = [];
     while ($student = $students_stmt->fetch(PDO::FETCH_ASSOC)) {
-        $students_by_semester[$student['semester_id']][] = $student;
+        $students_by_semester[$student['semester']][] = $student;
     }
 
 } catch (PDOException $e) {
@@ -75,7 +79,7 @@ $students_json = json_encode($students_by_semester);
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Assign Test / Subject to Students</title>
+    <title>Assign Subject to Students</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
         :root {
@@ -135,6 +139,7 @@ $students_json = json_encode($students_by_semester);
             padding: 10px;
             max-height: 300px;
             overflow-y: auto;
+            border: 1px solid var(--cool-gray);
         }
         .student-item {
             display: flex;
@@ -144,15 +149,18 @@ $students_json = json_encode($students_by_semester);
         .student-item input {
             margin-right: 8px;
         }
+        .student-item label {
+            font-weight: normal; /* Labels inside list should not be bold */
+        }
     </style>
 </head>
 <body>
 
 <div class="container">
-    <h2>Assign Test / Subject to Students</h2>
+    <h2>Assign Subject to Students</h2>
     <?php if (!empty($message)) echo $message; ?>
 
-    <form method="POST" action="">
+    <form method="POST" action="assign-subject-student.php">
         <label for="semester_id">Select Semester:</label>
         <select name="semester_id" id="semester_id" required>
             <option value="">-- Select Semester --</option>
@@ -188,21 +196,27 @@ const studentsList = document.getElementById('students_list');
 
 semesterSelect.addEventListener('change', function() {
     const semId = this.value;
+    
+    // Reset subject dropdown
     subjectSelect.innerHTML = '<option value="">-- Select Subject --</option>';
     subjectSelect.disabled = true;
+    
+    // Reset student list
     studentsList.innerHTML = '';
     studentsSection.style.display = 'none';
 
+    // Populate Subjects
     if (semId && subjectsBySemester[semId]) {
         subjectSelect.disabled = false;
         subjectsBySemester[semId].forEach(sub => {
             const opt = document.createElement('option');
             opt.value = sub.id;
-            opt.textContent = sub.name;
+            opt.textContent = sub.subject_code + ' - ' + sub.name;
             subjectSelect.appendChild(opt);
         });
     }
 
+    // Populate Students
     if (semId && studentsBySemester[semId]) {
         studentsSection.style.display = 'block';
         studentsBySemester[semId].forEach(stu => {
@@ -210,12 +224,16 @@ semesterSelect.addEventListener('change', function() {
             div.className = 'student-item';
             div.innerHTML = `
                 <label>
-                    <input type="checkbox" name="students[]" value="${stu.id}" checked>
+                    <input type-="checkbox" name="students[]" value="${stu.id}" checked>
                     ${stu.student_name}
                 </label>
             `;
             studentsList.appendChild(div);
         });
+    } else if (semId) {
+        // If semester is selected but no students are found
+        studentsSection.style.display = 'block';
+        studentsList.innerHTML = '<p style="padding: 10px; text-align: center;">No students found for this semester.</p>';
     }
 });
 </script>
