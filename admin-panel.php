@@ -175,6 +175,7 @@ $current_subject_sl_no = $subject_start_from + 1;
         <a href="view-students.php">View Students</a>
         <a href="add-subject.php">Add Subjects</a>
         <a href="subject-allocation.php">Subjects Allocation</a>
+        <a href="view-allocations.php">View Allocation</a>
         <a href="create-question.php">Generate Paper</a>
         <a href="logout.php">Logout</a>
     </div>
