@@ -1,170 +1,192 @@
 <?php
-// session_start(); // Enable if using sessions
-require_once('db.php'); // Use your PDO connection
-
-// --- Security Check (Placeholder) ---
-/*
-if (!isset($_SESSION['role']) || $_SESSION['role'] !== 'staff') { // Assuming staff or admin
-    header("Location: login.php");
-    exit;
-}
-*/
+// session_start(); // Uncomment if using authentication
+require_once('db.php'); // Your PDO connection from db.php
 
 $message = ''; // For success/error messages
 
-// Handle form submission
+// Handle form submission (optional)
 if ($_SERVER["REQUEST_METHOD"] == "POST") {
-    $class_id = filter_input(INPUT_POST, 'class_id', FILTER_VALIDATE_INT);
-    $qp_id = filter_input(INPUT_POST, 'qp_id', FILTER_VALIDATE_INT);
-    $semester_id = filter_input(INPUT_POST, 'semester_id', FILTER_VALIDATE_INT); // Get semester from form
+    $semester_id = filter_input(INPUT_POST, 'semester_id', FILTER_VALIDATE_INT);
+    $subject_id = filter_input(INPUT_POST, 'subject_id', FILTER_VALIDATE_INT);
+    $student_id = filter_input(INPUT_POST, 'student_id', FILTER_VALIDATE_INT);
 
-    if ($class_id && $qp_id && $semester_id) {
+    if ($semester_id && $subject_id && $student_id) {
         try {
-            // PostgreSQL-compatible query to insert if not already exists
-            $sql = "INSERT INTO test_allocation (class_id, qp_id) 
-                    VALUES (:class_id, :qp_id) 
+            // Example insert – you can replace this with your test allocation logic
+            $sql = "INSERT INTO test_allocation (class_id, qp_id)
+                    VALUES (:class_id, :qp_id)
                     ON CONFLICT (class_id, qp_id) DO NOTHING";
-            
+            // Placeholder (modify for your use case)
             $stmt = $pdo->prepare($sql);
-            $stmt->execute([':class_id' => $class_id, ':qp_id' => $qp_id]);
-
-            if ($stmt->rowCount() > 0) {
-                $message = "<p class='message success'>Test allocated successfully!</p>";
-            } else {
-                $message = "<p class='message error'>This test is already allocated to this class.</p>";
-            }
+            $stmt->execute([':class_id' => $semester_id, ':qp_id' => $subject_id]); // just example
+            $message = "<p class='message success'>Assigned successfully!</p>";
         } catch (PDOException $e) {
-            $message = "<p class='message error'>Database error: " . $e->getMessage() . "</p>";
+            $message = "<p class='message error'>Database error: " . htmlspecialchars($e->getMessage()) . "</p>";
         }
     } else {
-        $message = "<p class='message error'>Invalid input. Please select a semester, class, and question paper.</p>";
+        $message = "<p class='message error'>Please select all required fields.</p>";
     }
 }
 
-// Fetch data for the dropdowns
+// --- Fetch semesters for dropdown ---
 try {
-    // Fetch all semesters
     $sem_stmt = $pdo->query("SELECT id, name FROM semesters ORDER BY name");
     $semesters = $sem_stmt->fetchAll(PDO::FETCH_ASSOC);
 
-    // Fetch all classes and group them by semester_id
-    $class_stmt = $pdo->query("SELECT id, name, semester_id FROM classes ORDER BY name");
-    $classes_by_semester = [];
-    while ($class = $class_stmt->fetch(PDO::FETCH_ASSOC)) {
-        if (!isset($classes_by_semester[$class['semester_id']])) {
-            $classes_by_semester[$class['semester_id']] = [];
-        }
-        $classes_by_semester[$class['semester_id']][] = $class;
+    // Fetch subjects grouped by semester
+    $subjects_stmt = $pdo->query("SELECT id, name, semester_id FROM subjects ORDER BY name");
+    $subjects_by_semester = [];
+    while ($subject = $subjects_stmt->fetch(PDO::FETCH_ASSOC)) {
+        $subjects_by_semester[$subject['semester_id']][] = $subject;
     }
 
-    // Fetch all question papers
-    $qp_stmt = $pdo->query("SELECT id, title FROM question_papers ORDER BY title");
-    $question_papers = $qp_stmt->fetchAll(PDO::FETCH_ASSOC);
+    // Fetch students grouped by semester (assuming 'classes' link students to semesters)
+    $students_stmt = $pdo->query("
+        SELECT s.id, s.student_name, c.semester_id
+        FROM students s
+        JOIN classes c ON s.allotted_branch_management IS NOT NULL OR s.allotted_branch_kea IS NOT NULL
+        LEFT JOIN classes cl ON c.id = cl.id
+        WHERE c.semester_id IS NOT NULL
+        ORDER BY s.student_name
+    ");
+    $students_by_semester = [];
+    while ($row = $students_stmt->fetch(PDO::FETCH_ASSOC)) {
+        $students_by_semester[$row['semester_id']][] = $row;
+    }
 
 } catch (PDOException $e) {
-    die("Error fetching data: " . $e->getMessage());
+    die("Error fetching data: " . htmlspecialchars($e->getMessage()));
 }
 
-// Pass the classes data to JavaScript
-$classes_json = json_encode($classes_by_semester);
+// Pass data to JS
+$subjects_json = json_encode($subjects_by_semester);
+$students_json = json_encode($students_by_semester);
 ?>
 
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Assign Test to Class</title>
+    <title>Assign Test / Subject / Student</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-        /* Reusing styles from admin.php */
-        :root { --space-cadet: #2b2d42; --cool-gray: #8d99ae; --antiflash-white: #edf2f4; --red-pantone: #ef233c; --fire-engine-red: #d90429; }
-        body { font-family: 'Segoe UI', sans-serif; margin: 0; padding: 20px; background: var(--space-cadet); color: var(--antiflash-white); }
-        .back-link { display: block; max-width: 860px; margin: 0 auto 20px auto; text-align: right; font-weight: bold; color: var(--antiflash-white); text-decoration: none; }
-        .back-link:hover { text-decoration: underline; }
-        .container { max-width: 600px; margin: 20px auto; padding: 30px; background: rgba(141, 153, 174, 0.1); border-radius: 15px; border: 1px solid rgba(141, 153, 174, 0.2); }
-        h2 { text-align: center; margin-bottom: 20px; }
+        :root {
+            --space-cadet: #2b2d42;
+            --cool-gray: #8d99ae;
+            --antiflash-white: #edf2f4;
+            --red-pantone: #ef233c;
+            --fire-engine-red: #d90429;
+        }
+        body {
+            font-family: 'Segoe UI', sans-serif;
+            margin: 0; padding: 20px;
+            background: var(--space-cadet);
+            color: var(--antiflash-white);
+        }
+        .container {
+            max-width: 600px;
+            margin: 20px auto;
+            padding: 30px;
+            background: rgba(141,153,174,0.1);
+            border-radius: 15px;
+            border: 1px solid rgba(141,153,174,0.2);
+        }
+        h2 { text-align: center; }
         form { display: flex; flex-direction: column; gap: 10px; }
-        label { display: block; margin-bottom: 5px; font-weight: 600; }
-        select { width: 100%; padding: 10px; margin-bottom: 10px; border-radius: 5px; border: 1px solid var(--cool-gray); background: rgba(43, 45, 66, 0.5); color: var(--antiflash-white); box-sizing: border-box; }
-        select:disabled { background: rgba(43, 45, 66, 0.2); color: var(--cool-gray); }
-        button { padding: 12px 20px; border: none; border-radius: 5px; background-color: var(--fire-engine-red); color: var(--antiflash-white); font-weight: bold; cursor: pointer; width: 100%; font-size: 1.1em; margin-top: 10px; }
+        label { font-weight: bold; }
+        select, button {
+            padding: 10px;
+            border-radius: 5px;
+            border: 1px solid var(--cool-gray);
+            background: rgba(43,45,66,0.5);
+            color: var(--antiflash-white);
+        }
+        select:disabled {
+            background: rgba(43,45,66,0.2);
+            color: var(--cool-gray);
+        }
+        button {
+            background-color: var(--fire-engine-red);
+            border: none;
+            cursor: pointer;
+            font-weight: bold;
+            font-size: 1em;
+        }
         button:hover { background-color: var(--red-pantone); }
-        .message { padding: 10px; border-radius: 5px; margin-bottom: 1em; text-align: center; font-weight: bold; }
-        .success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
-        .error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .message {
+            text-align: center;
+            padding: 10px;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+        .success { background: #d4edda; color: #155724; }
+        .error { background: #f8d7da; color: #721c24; }
     </style>
 </head>
 <body>
-    <a href="/admin" class="back-link">&laquo; Back to Admin Dashboard</a>
+
     <div class="container">
-        <h2>Assign Test to Class</h2>
+        <h2>Assign Based on Semester</h2>
         <?php if (!empty($message)) echo $message; ?>
 
-        <form action="assign-test.php" method="POST">
-            
+        <form method="POST" action="">
             <label for="semester_id">Select Semester:</label>
             <select name="semester_id" id="semester_id" required>
-                <option value="">-- Select a Semester --</option>
-                <?php foreach ($semesters as $semester): ?>
-                    <option value="<?= htmlspecialchars($semester['id']) ?>">
-                        <?= htmlspecialchars($semester['name']) ?>
-                    </option>
+                <option value="">-- Select Semester --</option>
+                <?php foreach ($semesters as $sem): ?>
+                    <option value="<?= htmlspecialchars($sem['id']) ?>"><?= htmlspecialchars($sem['name']) ?></option>
                 <?php endforeach; ?>
             </select>
 
-            <label for="class_id">Select Class:</label>
-            <select name="class_id" id="class_id" required disabled>
-                <option value="">-- First Select a Semester --</option>
-                <!-- This will be populated by JavaScript -->
+            <label for="subject_id">Select Subject:</label>
+            <select name="subject_id" id="subject_id" required disabled>
+                <option value="">-- First select a Semester --</option>
             </select>
 
-            <label for="qp_id">Select Question Paper:</label>
-            <select name="qp_id" id="qp_id" required>
-                <option value="">-- Select a Question Paper --</option>
-                <?php foreach ($question_papers as $qp): ?>
-                    <option value="<?= htmlspecialchars($qp['id']) ?>">
-                        <?= htmlspecialchars($qp['title']) ?>
-                    </option>
-                <?php endforeach; ?>
+            <label for="student_id">Select Student:</label>
+            <select name="student_id" id="student_id" required disabled>
+                <option value="">-- First select a Semester --</option>
             </select>
 
-            <button type="submit">Assign Test</button>
+            <button type="submit">Assign</button>
         </form>
     </div>
 
     <script>
-        // This JavaScript will filter the classes based on the selected semester
-        
-        // 1. Get the class data from PHP
-        const classesBySemester = <?= $classes_json ?>;
+        const subjectsBySemester = <?= $subjects_json ?>;
+        const studentsBySemester = <?= $students_json ?>;
 
-        // 2. Get the dropdown elements
         const semesterSelect = document.getElementById('semester_id');
-        const classSelect = document.getElementById('class_id');
+        const subjectSelect = document.getElementById('subject_id');
+        const studentSelect = document.getElementById('student_id');
 
-        // 3. Add an event listener to the semester dropdown
         semesterSelect.addEventListener('change', function() {
-            const selectedSemesterId = this.value;
-            
-            // Clear the class dropdown
-            classSelect.innerHTML = '<option value="">-- Select a Class --</option>';
-            
-            // Check if a valid semester was chosen
-            if (selectedSemesterId && classesBySemester[selectedSemesterId]) {
-                // Enable the class dropdown
-                classSelect.disabled = false;
-                
-                // Populate the class dropdown with the correct classes
-                classesBySemester[selectedSemesterId].forEach(function(classItem) {
-                    const option = document.createElement('option');
-                    option.value = classItem.id;
-                    option.textContent = classItem.name;
-                    classSelect.appendChild(option);
+            const semesterId = this.value;
+
+            // Reset subject dropdown
+            subjectSelect.innerHTML = '<option value="">-- Select Subject --</option>';
+            studentSelect.innerHTML = '<option value="">-- Select Student --</option>';
+            subjectSelect.disabled = true;
+            studentSelect.disabled = true;
+
+            if (semesterId && subjectsBySemester[semesterId]) {
+                subjectSelect.disabled = false;
+                subjectsBySemester[semesterId].forEach(sub => {
+                    const opt = document.createElement('option');
+                    opt.value = sub.id;
+                    opt.textContent = sub.name;
+                    subjectSelect.appendChild(opt);
                 });
-            } else {
-                // Disable the class dropdown if no semester is selected
-                classSelect.innerHTML = '<option value="">-- First Select a Semester --</option>';
-                classSelect.disabled = true;
+            }
+
+            if (semesterId && studentsBySemester[semesterId]) {
+                studentSelect.disabled = false;
+                studentsBySemester[semesterId].forEach(stu => {
+                    const opt = document.createElement('option');
+                    opt.value = stu.id;
+                    opt.textContent = stu.student_name;
+                    studentSelect.appendChild(opt);
+                });
             }
         });
     </script>
