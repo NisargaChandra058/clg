@@ -115,7 +115,7 @@ $current_sl_no = 1;
     <div class="navbar">
         <h2>Subject Allocations</h2>
         <div class="navbar-links">
-            <a href="/admin">Back to Dashboard</a>
+            <a href="/admin-panel.php">Back to Dashboard</a>
             <a href="/logout.php">Logout</a>
         </div>
     </div>
