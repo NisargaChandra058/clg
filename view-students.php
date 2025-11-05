@@ -97,17 +97,23 @@ $current_sl_no = $start_from + 1;
         .container { width: 90%; max-width: 1200px; margin: 20px auto; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
         h2 { color: #444; border-bottom: 2px solid #eee; padding-bottom: 10px; margin-bottom: 20px; }
         form.filter { margin-bottom: 15px; text-align: right; }
-        select, button { padding: 6px 10px; font-size: 15px; }
+        select { padding: 6px 10px; font-size: 15px; }
         table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-        th, td { border: 1px solid #ddd; padding: 10px; text-align: left; }
+        th, td { border: 1px solid #ddd; padding: 10px; text-align: left; vertical-align: middle; }
         th { background-color: #007bff; color: #fff; }
+        td:last-child { text-align: center; }
         .pagination { margin: 15px 0; text-align: center; }
         .pagination a { margin: 0 5px; padding: 6px 12px; border: 1px solid #007bff; border-radius: 4px; color: #007bff; text-decoration: none; }
         .pagination a.active { background-color: #007bff; color: #fff; }
-        .action-btn { padding: 5px 10px; border-radius: 4px; text-decoration: none; color: #fff; margin-right: 5px; }
+        .action-btn { display: inline-block; padding: 6px 10px; border-radius: 4px; text-decoration: none; color: #fff; font-size: 14px; margin: 0 2px; transition: background 0.3s ease; }
         .edit-btn { background-color: #28a745; }
+        .edit-btn:hover { background-color: #218838; }
         .remove-btn { background-color: #dc3545; }
         .remove-btn:hover { background-color: #b52d3b; }
+        @media (max-width: 600px) {
+            table { font-size: 13px; }
+            .action-btn { padding: 5px 8px; font-size: 12px; }
+        }
     </style>
 </head>
 <body>
@@ -130,6 +136,7 @@ $current_sl_no = $start_from + 1;
             </select>
         </form>
 
+        <!-- Students Table -->
         <table>
             <thead>
                 <tr>
@@ -151,9 +158,10 @@ $current_sl_no = $start_from + 1;
                         <tr>
                             <td><?= $current_sl_no ?></td>
                             <td><?= htmlspecialchars($student['usn'] ?? '') ?></td>
-<td><?= htmlspecialchars($student['name'] ?? '') ?></td>
-<td><?= htmlspecialchars($student['email'] ?? '') ?></td>
-<td><?= htmlspecialchars((string)($student['semester'] ?? '-')) ?></td>
+                            <td><?= htmlspecialchars($student['name'] ?? '') ?></td>
+                            <td><?= htmlspecialchars($student['email'] ?? '') ?></td>
+                            <td><?= htmlspecialchars((string)($student['semester'] ?? '-')) ?></td>
+                            <td>
                                 <a href="edit-student.php?id=<?= $student['id'] ?>" class="action-btn edit-btn">Edit</a>
                                 <a href="?delete_student=<?= $student['id'] ?>" class="action-btn remove-btn" onclick="return confirm('Are you sure you want to delete this student?')">Remove</a>
                             </td>
