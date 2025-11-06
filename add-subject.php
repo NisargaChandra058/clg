@@ -96,7 +96,7 @@ try {
     </style>
 </head>
 <body>
-    <a href="/admin" class="back-link">&laquo; Back to Admin Dashboard</a>
+    <a href="/admin-panel.php" class="back-link">&laquo; Back to Admin Dashboard</a>
 
     <div class="container">
         <h2>Add New Subjects (Bulk)</h2>
