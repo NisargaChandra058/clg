@@ -64,8 +64,6 @@ function run_migration(PDO $pdo, string $migration_id, string $sql) {
             // The object already exists, but wasn't logged. Log it now.
             $log_stmt = $pdo->prepare("INSERT INTO db_migrations (migration_id) VALUES (?) ON CONFLICT (migration_id) DO NOTHING");
             $log_stmt->execute([$migration_id]);
-            // The connection state is healthy because we rolled back *this* transaction,
-            // not the main one.
         } else {
             // A different, more serious error occurred.
             throw $e; // Re-throw the error
@@ -134,6 +132,7 @@ try {
         ADD COLUMN IF NOT EXISTS semester INT;
     ");
 
+    // Add columns to other tables
     run_migration($pdo, 'add_classes_semester_id', "ALTER TABLE classes ADD COLUMN IF NOT EXISTS semester_id INT;");
     run_migration($pdo, 'add_qp_subject_id', "ALTER TABLE question_papers ADD COLUMN IF NOT EXISTS subject_id INT;");
     run_migration($pdo, 'add_subjects_semester_id', "ALTER TABLE subjects ADD COLUMN IF NOT EXISTS semester_id INT;"); 
@@ -148,11 +147,14 @@ try {
         ON CONFLICT (name) DO NOTHING;
     ");
     
-    // Add constraints
+    // Add constraints (These will now be caught and logged safely)
     run_migration($pdo, 'add_constraint_students_email_unique', "ALTER TABLE students ADD CONSTRAINT students_email_unique UNIQUE (email);");
     run_migration($pdo, 'add_constraint_students_usn_unique', "ALTER TABLE students ADD CONSTRAINT students_usn_unique UNIQUE (usn);");
     
 } catch (PDOException $e) {
-    die("Database connection failed: "." . $e->getMessage());
+    // --- THIS IS THE FIX ---
+    // Changed the "die" statement to use printf for safer string handling.
+    // This will resolve the "Unclosed '('" parse error.
+    die(sprintf("Database connection failed: %s", $e->getMessage()));
 }
 ?>
