@@ -1,4 +1,5 @@
 <?php
+session_start();
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -168,6 +169,7 @@ a:hover {
     <!-- Background Video -->
     <div class="video-background">
         <video autoplay muted loop id="bg-video">
+            <!-- Ensure this video file is in your root directory: /video/back.mp4 -->
             <source src="video/back.mp4" type="video/mp4">
             Your browser does not support the video tag.
         </video>
@@ -176,7 +178,11 @@ a:hover {
     <!-- Main Content -->
     <div class="main-content">
         <div class="navbar">
-
+             <!-- Corrected links to match your file structure -->
+            <a href="index.php">Home</a>
+            <a href="login.php">Admin Login</a>
+            <a href="student-login.php">Student Login</a>
+            <a href="student-corner.php">Student Corner</a>
         </div>
 
         <div class="content">
@@ -185,20 +191,11 @@ a:hover {
         </div>
         
         <div class="buttons">
+            <!-- Corrected links -->
             <a href="login.php" class="button">Staff Login</a>
-            <a href="student-dashboard.php" class="button">Student Corner</a>
+            <a href="student-corner.php" class="button">Student Corner</a>
         </div>
     </div>
-
-    <!-- Loading Spinner -->
-    <div class="loading">
-        <div class="spinner"></div>
-    </div>
-
-    <!-- Custom Scripts -->
-    <script>
-        // You can add any JavaScript for interactive features here
-    </script>
 </body>
 </html>
 
