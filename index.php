@@ -176,14 +176,7 @@ a:hover {
     </div>
 
     <!-- Main Content -->
-    <div class="main-content">
-        <div class="navbar">
-             <!-- Corrected links to match your file structure -->
-            <a href="index.php">Home</a>
-            <a href="login.php">Admin Login</a>
-            <a href="student-login.php">Student Login</a>
-            <a href="student-corner.php">Student Corner</a>
-        </div>
+
 
         <div class="content">
             <h1>Welcome to the AMC College Exam Section</h1>
@@ -198,4 +191,5 @@ a:hover {
     </div>
 </body>
 </html>
+
 
