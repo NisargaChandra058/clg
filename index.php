@@ -185,10 +185,7 @@ a:hover {
     <div class="main-content">
         <div class="navbar">
             <!-- Added the navigation links -->
-            <a href="index.php">Home</a>
-            <a href="login.php">Admin Login</a>
-            <a href="student-login.php">Student Login</a>
-            <a href="student-corner.php">Student Corner</a>
+   
         </div>
 
         <div class="content">
@@ -214,3 +211,4 @@ a:hover {
     </script>
 </body>
 </html>
+
