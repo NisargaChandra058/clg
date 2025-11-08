@@ -1,176 +1,195 @@
 <?php
-session_start();
-// 1. Include the correct PDO database connection
-include('db-config.php'); 
+// session_start(); // Enable if using sessions
+require_once('db.php'); // Use PDO connection
 
-// Ensure only admins can access
+// --- Security Check (Placeholder) ---
+/*
 if (!isset($_SESSION['role']) || $_SESSION['role'] !== 'admin') {
-    header("Location: login.php");
+    header("Location: /login");
     exit;
 }
+*/
 
-$message = ""; // To store feedback messages
-$message_type = "error"; // Default message type
-$staff_members = [];
-$available_subjects = [];
+$message = ''; // For success/error messages
 
-try {
-    // --- Handle subject allocation on POST request ---
-    if ($_SERVER["REQUEST_METHOD"] == "POST") {
-        $staff_id = filter_input(INPUT_POST, 'staff_id', FILTER_VALIDATE_INT);
-        // Ensure subject_ids is treated as an array, even if only one is selected
-        $subject_ids = isset($_POST['subject_ids']) ? (array)$_POST['subject_ids'] : []; 
+// Handle form submission
+if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['allocate_subject'])) {
+    $staff_id = filter_input(INPUT_POST, 'staff_id', FILTER_VALIDATE_INT);
+    $subject_id = filter_input(INPUT_POST, 'subject_id', FILTER_VALIDATE_INT);
+    $class_id = filter_input(INPUT_POST, 'class_id', FILTER_VALIDATE_INT);
 
-        if (!$staff_id || empty($subject_ids)) {
-            $message = "Please select a staff member and at least one subject.";
-        } else {
-            $conn->beginTransaction(); // Start transaction for atomic insertion
+    if ($staff_id && $subject_id && $class_id) {
+        try {
+            // New query with class_id
+            $sql = "INSERT INTO subject_allocation (staff_id, subject_id, class_id) 
+                    VALUES (:staff_id, :subject_id, :class_id) 
+                    ON CONFLICT (staff_id, subject_id, class_id) DO NOTHING";
+            
+            $stmt = $pdo->prepare($sql);
+            $stmt->execute([
+                ':staff_id' => $staff_id,
+                ':subject_id' => $subject_id,
+                ':class_id' => $class_id
+            ]);
 
-            // Prepare statement for checking existing allocation
-            $check_sql = "SELECT COUNT(*) FROM subject_allocation WHERE staff_id = ? AND subject_id = ?";
-            $check_stmt = $conn->prepare($check_sql);
-
-            // Prepare statement for inserting new allocation
-            $insert_sql = "INSERT INTO subject_allocation (staff_id, subject_id) VALUES (?, ?)";
-            $insert_stmt = $conn->prepare($insert_sql);
-
-            $allocated_count = 0;
-            $skipped_count = 0;
-
-            foreach ($subject_ids as $subject_id_raw) {
-                $subject_id = filter_var($subject_id_raw, FILTER_VALIDATE_INT);
-                if ($subject_id === false) continue; // Skip invalid subject IDs
-
-                // Check if this allocation already exists
-                $check_stmt->execute([$staff_id, $subject_id]);
-                if ($check_stmt->fetchColumn() == 0) {
-                    // Allocation doesn't exist, insert it
-                    if ($insert_stmt->execute([$staff_id, $subject_id])) {
-                        $allocated_count++;
-                    } else {
-                        // If one insertion fails, roll back the entire transaction
-                        throw new PDOException("Failed to allocate subject ID: $subject_id");
-                    }
-                } else {
-                    $skipped_count++; // Allocation already exists
-                }
+            if ($stmt->rowCount() > 0) {
+                $message = "<p class='message success'>Subject allocated successfully!</p>";
+            } else {
+                $message = "<p class='message error'>This subject is already allocated to this staff member for this class.</p>";
             }
-
-            $conn->commit(); // Commit transaction if all insertions were successful
-
-            $message = "Successfully allocated $allocated_count subject(s).";
-            if ($skipped_count > 0) {
-                $message .= " Skipped $skipped_count already allocated subject(s).";
-            }
-            $message_type = "success";
+        } catch (PDOException $e) {
+            $message = "<p class='message error'>Database error: " . $e->getMessage() . "</p>";
         }
+    } else {
+        $message = "<p class='message error'>Invalid input. Please select a semester, class, subject, and staff member.</p>";
+    }
+}
+
+// --- Fetch Data for Dropdowns ---
+try {
+    // Fetch all semesters
+    $sem_stmt = $pdo->query("SELECT id, name FROM semesters ORDER BY name");
+    $semesters = $sem_stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    // Fetch all classes and group by semester
+    $class_stmt = $pdo->query("SELECT id, name, semester_id FROM classes ORDER BY name");
+    $classes_by_semester = [];
+    while ($class = $class_stmt->fetch(PDO::FETCH_ASSOC)) {
+        $classes_by_semester[$class['semester_id']][] = $class;
     }
 
-    // --- Fetch staff members for the dropdown ---
-    // Corrected Case for Enum values 'HOD' and 'principal'
-    $staff_stmt = $conn->prepare("SELECT id, first_name, surname FROM users WHERE role IN ('staff', 'HOD', 'principal') ORDER BY first_name, surname"); 
-    $staff_stmt->execute();
+    // Fetch all subjects and group by semester
+    // This query no longer filters out allocated subjects
+    $subject_stmt = $pdo->query("
+        SELECT id, name AS subject_name, subject_code, semester_id
+        FROM subjects
+        ORDER BY subject_code
+    ");
+    $subjects_by_semester = [];
+     while ($subject = $subject_stmt->fetch(PDO::FETCH_ASSOC)) {
+        $subjects_by_semester[$subject['semester_id']][] = $subject;
+    }
+
+    // Fetch all staff members
+    $staff_stmt = $pdo->query("SELECT id, first_name, surname FROM users WHERE role = 'staff' ORDER BY first_name");
     $staff_members = $staff_stmt->fetchAll(PDO::FETCH_ASSOC);
 
-    // --- Fetch subjects for the multi-select ---
-// Fetch only subjects that are NOT already allocated
-$subject_stmt = $conn->prepare("
-    SELECT s.id, s.name AS subject_name, s.subject_code, s.branch, s.semester
-    FROM subjects s
-    WHERE s.id NOT IN (SELECT subject_id FROM subject_allocation)
-    ORDER BY s.name
-");
-$subject_stmt->execute();
-$available_subjects = $subject_stmt->fetchAll(PDO::FETCH_ASSOC);
-
-
 } catch (PDOException $e) {
-    if ($conn->inTransaction()) {
-        $conn->rollBack(); // Roll back transaction on error
-    }
-    // Provide specific error info during development, generic in production
-    $message = "Database Error: " . $e->getMessage() . " (Code: " . $e->getCode() . ")";
-    // $message = "An error occurred during subject allocation. Please try again."; // Production message
-    $message_type = "error";
-    
+    die("Error fetching data: " . $e->getMessage());
 }
+
+// Pass data to JavaScript
+$classes_json = json_encode($classes_by_semester);
+$subjects_json = json_encode($subjects_by_semester);
 ?>
 
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    <title>Allocate Subject to Staff</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Subject Allocation</title>
     <style>
-        body { font-family: Arial, sans-serif; margin: 0; padding: 0; background-color: #f4f4f9; color: #333; }
-        .navbar { background-color: #007bff; padding: 1em; display: flex; justify-content: flex-end; gap: 1em; }
-        .navbar a { color: #fff; text-decoration: none; padding: 0.5em 1em; border-radius: 5px; transition: background-color 0.3s ease; }
-        .navbar a:hover { background-color: #0056b3; }
-        .content { padding: 2em; margin: 1em auto; max-width: 800px; background-color: #fff; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
-        h2 { text-align: center; margin-bottom: 1.5em; color: #444;}
-        form { display: flex; flex-direction: column; gap: 1.2em; }
-        form label { font-weight: bold; color: #555; }
-        form select { padding: 0.75em; border: 1px solid #ddd; border-radius: 5px; font-size: 1em; width: 100%; box-sizing: border-box; }
-        form select[multiple] { height: 200px; /* Make multiple select taller */ }
-        form p { font-size: 0.9em; color: #777; margin-top: -0.5em; margin-bottom: 0.5em; }
-        form button { background-color: #28a745; color: #fff; border: none; padding: 0.75em 1.5em; border-radius: 5px; cursor: pointer; font-size: 1em; font-weight: bold; transition: background-color 0.3s ease; align-self: center; /* Center button */ width: auto; /* Allow button to size */ }
-        form button:hover { background-color: #218838; }
-        .message { padding: 15px; margin-bottom: 20px; border-radius: 5px; width: 100%; box-sizing: border-box; text-align: center; font-size: 16px; border: 1px solid transparent;}
-        .message.success { background-color: #d4edda; color: #155724; border-color: #c3e6cb; }
-        .message.error { background-color: #f8d7da; color: #721c24; border-color: #f5c6cb; }
-         .back-link { display: block; margin-top: 20px; text-align: center; color: #007bff; }
+        /* Reusing styles from admin.php */
+        :root { --space-cadet: #2b2d42; --cool-gray: #8d99ae; --antiflash-white: #edf2f4; --red-pantone: #ef233c; --fire-engine-red: #d90429; }
+        body { font-family: 'Segoe UI', sans-serif; margin: 0; padding: 20px; background: var(--space-cadet); color: var(--antiflash-white); }
+        .back-link { display: block; max-width: 860px; margin: 0 auto 20px auto; text-align: right; font-weight: bold; color: var(--antiflash-white); text-decoration: none; }
+        .back-link:hover { text-decoration: underline; }
+        .container { max-width: 600px; margin: 20px auto; padding: 30px; background: rgba(141, 153, 174, 0.1); border-radius: 15px; border: 1px solid rgba(141, 153, 174, 0.2); }
+        h2 { text-align: center; margin-bottom: 20px; }
+        form { display: flex; flex-direction: column; gap: 10px; }
+        label { display: block; margin-bottom: 5px; font-weight: 600; }
+        select { width: 100%; padding: 10px; margin-bottom: 10px; border-radius: 5px; border: 1px solid var(--cool-gray); background: rgba(43, 45, 66, 0.5); color: var(--antiflash-white); box-sizing: border-box; }
+        select:disabled { background: rgba(43, 45, 66, 0.2); color: var(--cool-gray); }
+        button { padding: 12px 20px; border: none; border-radius: 5px; background-color: var(--fire-engine-red); color: var(--antiflash-white); font-weight: bold; cursor: pointer; width: 100%; font-size: 1.1em; margin-top: 10px; }
+        button:hover { background-color: var(--red-pantone); }
+        .message { padding: 10px; border-radius: 5px; margin-bottom: 1em; text-align: center; font-weight: bold; }
+        .success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
     </style>
 </head>
 <body>
-    <div class="navbar">
-        <a href="admin-panel.php">Back to Admin Dashboard</a>
-        <a href="logout.php">Logout</a>
-    </div>
+    <a href="/admin" class="back-link">&laquo; Back to Admin Dashboard</a>
+    <div class="container">
+        <h2>Allocate Subject to Staff</h2>
 
-    <div class="content">
-        <h2>Allocate Subjects to Staff</h2>
-
-        <?php 
-        // Display feedback message if set
-        if (!empty($message)) {
-            echo "<div class='message " . htmlspecialchars($message_type) . "'>" . htmlspecialchars($message) . "</div>";
-        } 
-        ?>
+        <?php if (isset($message)) echo $message; ?>
 
         <form action="subject-allocation.php" method="POST">
-            <label for="staff_id">Select Staff Member:</label>
+            <label for="semester_id">Select Semester:</label>
+            <select name="semester_id" id="semester_id" required>
+                <option value="">-- Select a Semester --</option>
+                <?php foreach ($semesters as $semester): ?>
+                    <option value="<?= htmlspecialchars($semester['id']) ?>">
+                        <?= htmlspecialchars($semester['name']) ?>
+                    </option>
+                <?php endforeach; ?>
+            </select>
+            
+            <label for="class_id">Select Class/Section:</label>
+            <select name="class_id" id="class_id" required disabled>
+                <option value="">-- First Select a Semester --</option>
+            </select>
+
+            <label for="subject_id">Select Subject:</label>
+            <select name="subject_id" id="subject_id" required disabled>
+                <option value="">-- First Select a Semester --</option>
+            </select>
+            
+            <label for="staff_id">Select Staff:</label>
             <select name="staff_id" id="staff_id" required>
-                <option value="" disabled selected>-- Select Staff --</option>
+                <option value="">-- Select Staff --</option>
                 <?php foreach ($staff_members as $staff): ?>
                     <option value="<?= htmlspecialchars($staff['id']) ?>">
                         <?= htmlspecialchars($staff['first_name'] . ' ' . $staff['surname']) ?>
                     </option>
                 <?php endforeach; ?>
-                <?php if(empty($staff_members)): ?>
-                     <option value="" disabled>No staff members found.</option>
-                <?php endif; ?>
             </select>
-            
-            <label for="subject_ids">Select Subjects to Allocate:</label>
-            <select name="subject_ids[]" id="subject_ids" multiple required>
-                 <?php foreach ($available_subjects as $subject): ?>
-                    <option value="<?= htmlspecialchars($subject['id']) ?>">
-                        <?= htmlspecialchars($subject['subject_code'] . ' - ' . $subject['subject_name'] . ' (Sem ' . $subject['semester'] . ', ' . $subject['branch'] . ')') ?>
-                    </option>
-                <?php endforeach; ?>
-                 <?php if(empty($available_subjects)): ?>
-                     <option value="" disabled>No subjects available to allocate.</option>
-                 <?php endif; ?>
-            </select>
-            <p>Hold Ctrl (or Cmd on Mac) to select multiple subjects.</p>
 
-            <button type="submit">Allocate Selected Subjects</button>
+            <button type="submit" name="allocate_subject">Allocate Subject</button>
         </form>
-         <a href="admin-panel.php" class="back-link">Cancel</a>
     </div>
+
+    <script>
+        // Get the data from PHP
+        const classesBySemester = <?= $classes_json ?>;
+        const subjectsBySemester = <?= $subjects_json ?>;
+
+        const semesterSelect = document.getElementById('semester_id');
+        const classSelect = document.getElementById('class_id');
+        const subjectSelect = document.getElementById('subject_id');
+
+        semesterSelect.addEventListener('change', function() {
+            const selectedSemesterId = this.value;
+            
+            // Clear dropdowns
+            classSelect.innerHTML = '<option value="">-- Select a Class --</option>';
+            subjectSelect.innerHTML = '<option value="">-- Select a Subject --</option>';
+            
+            // Enable/Disable
+            classSelect.disabled = !selectedSemesterId;
+            subjectSelect.disabled = !selectedSemesterId;
+
+            // Populate Classes
+            if (selectedSemesterId && classesBySemester[selectedSemesterId]) {
+                classesBySemester[selectedSemesterId].forEach(function(classItem) {
+                    const option = document.createElement('option');
+                    option.value = classItem.id;
+                    option.textContent = classItem.name;
+                    classSelect.appendChild(option);
+                });
+            }
+
+            // Populate Subjects
+            if (selectedSemesterId && subjectsBySemester[selectedSemesterId]) {
+                subjectsBySemester[selectedSemesterId].forEach(function(subjectItem) {
+                    const option = document.createElement('option');
+                    option.value = subjectItem.id;
+                    option.textContent = subjectItem.subject_code + ' - ' + subjectItem.subject_name;
+                    subjectSelect.appendChild(option);
+                });
+            }
+        });
+    </script>
 </body>
 </html>
-
-
-
