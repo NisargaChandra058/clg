@@ -39,7 +39,7 @@ a:hover {
 
 /* Background Video */
 .video-background {
-    position: absolute;
+    position: fixed; /* Use fixed to ensure it covers the viewport */
     top: 0;
     left: 0;
     width: 100%;
@@ -59,16 +59,20 @@ a:hover {
     z-index: 1;
     text-align: center;
     padding: 80px 20px;
+    /* Added a semi-transparent overlay to make text readable */
+    background-color: rgba(0, 0, 0, 0.5);
+    min-height: 100vh;
 }
 
 .navbar {
-    background-color: rgba(0, 0, 0, 0.5);
+    background-color: rgba(0, 0, 0, 0.7);
     padding: 15px;
     position: fixed;
     width: 100%;
     top: 0;
     left: 0;
     text-align: center;
+    z-index: 2; /* Ensure navbar is above main content */
 }
 
 .navbar a {
@@ -80,10 +84,13 @@ a:hover {
 }
 
 .navbar a:hover {
-    background-color: #2980b9;
+    background-color: #3498db;
 }
 
 /* Heading and Content */
+.content {
+    padding-top: 100px; /* Push content below the fixed navbar */
+}
 .content h1 {
     font-size: 3rem;
     color: #fff;
@@ -141,7 +148,7 @@ a:hover {
 /* Responsive Styles */
 @media (max-width: 768px) {
     .navbar {
-        text-align: left;
+        text-align: center; /* Keep links centered */
         padding: 10px;
     }
 
@@ -162,7 +169,6 @@ a:hover {
         padding: 12px 20px;
     }
 }
-
 </style>
 </head>
 <body>
@@ -176,7 +182,14 @@ a:hover {
     </div>
 
     <!-- Main Content -->
-
+    <div class="main-content">
+        <div class="navbar">
+            <!-- Added the navigation links -->
+            <a href="index.php">Home</a>
+            <a href="login.php">Admin Login</a>
+            <a href="student-login.php">Student Login</a>
+            <a href="student-corner.php">Student Corner</a>
+        </div>
 
         <div class="content">
             <h1>Welcome to the AMC College Exam Section</h1>
@@ -189,7 +202,15 @@ a:hover {
             <a href="student-corner.php" class="button">Student Corner</a>
         </div>
     </div>
+
+    <!-- Loading Spinner -->
+    <div class="loading">
+        <div class="spinner"></div>
+    </div>
+
+    <!-- Custom Scripts -->
+    <script>
+        // You can add any JavaScript for interactive features here
+    </script>
 </body>
 </html>
-
-
