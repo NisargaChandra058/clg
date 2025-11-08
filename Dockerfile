@@ -1,42 +1,41 @@
-# Start from the official PHP 8.2 Apache image
+# Use the official PHP image with Apache web server
 FROM php:8.2-apache
 
-# Step 1: Install system-level dependencies
-# These are required by the PHP extensions we will install next.
-# - GD needs libraries for handling fonts (freetype) and images (jpeg, png).
-# - pdo_pgsql needs the PostgreSQL client library (libpq-dev).
-# - zip and Composer need unzip and zip libraries.
+# Enable Apache's rewrite module
+RUN a2enmod rewrite
+
+# --- THIS IS THE IMPORTANT LINE ---
+# Copy the custom Apache configuration to allow .htaccess
+COPY apache/000-default.conf /etc/apache2/sites-available/000-default.conf
+# --- END IMPORTANT LINE ---
+
+# Install system dependencies required for PHP extensions
 RUN apt-get update && apt-get install -y \
-    libfreetype6-dev \
-    libjpeg62-turbo-dev \
-    libpng-dev \
     libpq-dev \
     libzip-dev \
-    unzip \
-    && apt-get clean
+    libpng-dev \
+    libjpeg-dev \
+    libfreetype6-dev \
+    libcurl4-openssl-dev \
+    && rm -rf /var/lib/apt/lists/*
 
-# Step 2: Configure and install the required PHP extensions
-# The `docker-php-ext-install` command compiles and enables PHP modules.
-# We need 'gd' for PhpSpreadsheet, 'pdo_pgsql' for the database, and 'zip'.
+# Configure and install the gd, zip, and curl extensions
 RUN docker-php-ext-configure gd --with-freetype --with-jpeg \
-    && docker-php-ext-install -j$(nproc) gd pdo_pgsql zip
+    && docker-php-ext-install -j$(nproc) gd \
+    && docker-php-ext-install pdo pdo_pgsql zip curl
 
-# Step 3: Install Composer (the PHP dependency manager) globally
-COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
+# Install Composer for PHP dependency management
+COPY --from=composer /usr/bin/composer /usr/bin/composer
 
-# Step 4: Set the working directory for the rest of the build
+# Set the working directory for our application
 WORKDIR /var/www/html
 
-# Step 5: Install PHP dependencies using Composer
-# We copy composer.json first to take advantage of Docker's caching.
-# This step will fail if composer.json has errors.
+# Copy composer files and install dependencies
 COPY composer.json .
-RUN composer install --no-dev --optimize-autoloader
+RUN composer install
 
-# Step 6: Copy the rest of your application files into the web root
-COPY . .
+# Copy the rest of the application source code
+COPY src/ .
 
-# Step 7 (FINAL STEP): Set permissions for the uploads directory AFTER all files are copied.
-# This ensures that even if an 'uploads' folder exists in the repo, its permissions are corrected.
-RUN mkdir -p /var/www/html/uploads && chown -R www-data:www-data /var/www/html/uploads
-
+# Ensure the uploads directory and all files are writable by the web server
+RUN mkdir -p uploads && chown -R www-data:www-data /var/www/html
