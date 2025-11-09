@@ -1,10 +1,11 @@
 <?php
+session_save_path('/var/www/sessions');
 session_start();
 require_once('db.php'); // Use PDO connection
 
 // Check if student is logged in
 if (!isset($_SESSION['student_id'])) {
-    header('Location: /student-login');
+    header('Location: student-login.php');
     exit;
 }
 
@@ -35,7 +36,7 @@ try {
             ':content' => $answers
         ]);
         
-        $message = "<p class='message success'>Your test has been submitted successfully!</p>";
+        $message = "<p class='message success'>Your test has been submitted successfully! <a href='student-dashboard.php'>Back to Dashboard</a></p>";
     }
 
     // --- Fetch Test Content ---
@@ -46,6 +47,14 @@ try {
     if (!$test) {
         die("Test not found.");
     }
+    
+    // Check if test was already submitted
+    $check_stmt = $pdo->prepare("SELECT id FROM ia_results WHERE student_id = :student_id AND qp_id = :qp_id");
+    $check_stmt->execute([':student_id' => $student_id, ':qp_id' => $test_id]);
+    if ($check_stmt->fetch()) {
+        $message = "<p class='message error'>You have already submitted this test. <a href='student-dashboard.php'>Back to Dashboard</a></p>";
+    }
+
 
 } catch (PDOException $e) {
     die("Database error: " . htmlspecialchars($e->getMessage()));
@@ -72,25 +81,29 @@ try {
         button:hover { background-color: var(--red-pantone); }
         .message { padding: 10px; border-radius: 5px; margin-bottom: 1em; text-align: center; font-weight: bold; }
         .success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .message a { color: #0056b3; font-weight: bold; }
     </style>
 </head>
 <body>
-    <a href="/student-dashboard" class="back-link">&laquo; Back to Dashboard</a>
+    <a href="student-dashboard.php" class="back-link">&laquo; Back to Dashboard</a>
 
     <div class="container">
-        <?php if (!empty($message)) echo $message; ?>
-        
-        <div class="question-paper">
-            <h1><?= htmlspecialchars($test['title']) ?></h1>
-            <hr style="margin: 15px 0;">
-            <div class="content"><?= nl2br(htmlspecialchars($test['content'])) ?></div>
-        </div>
+        <?php if (!empty($message)): ?>
+            <div class="message-container"><?= $message ?></div>
+        <?php else: ?>
+            <div class="question-paper">
+                <h1><?= htmlspecialchars($test['title']) ?></h1>
+                <hr style="margin: 15px 0;">
+                <div class="content"><?= nl2br(htmlspecialchars($test['content'])) ?></div>
+            </div>
 
-        <form method="POST">
-            <label for="answers" style="font-weight: bold; font-size: 1.2em; margin-top: 20px; display: block;">Your Answers:</label>
-            <textarea id="answers" name="answers" placeholder="Type your answers here..."></textarea>
-            <button type:="submit">Submit Test</button>
-        </form>
+            <form method="POST">
+                <label for="answers" style="font-weight: bold; font-size: 1.2em; margin-top: 20px; display: block;">Your Answers:</label>
+                <textarea id="answers" name="answers" placeholder="Type your answers here..."></textarea>
+                <button type="submit">Submit Test</button>
+            </form>
+        <?php endif; ?>
     </div>
 </body>
 </html>
