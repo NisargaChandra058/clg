@@ -1,109 +1,169 @@
 <?php
-session_save_path('/var/www/sessions');
-session_start();
-require_once('db.php'); // Use PDO connection
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
 
-// Check if student is logged in
+session_start();
+require_once('db.php'); // Make sure this connects to PostgreSQL via PDO
+
+// --- Check if student is logged in ---
 if (!isset($_SESSION['student_id'])) {
     header('Location: student-login.php');
     exit;
 }
 
 $student_id = $_SESSION['student_id'];
+
+// --- Ensure test ID ---
 $test_id = filter_input(INPUT_GET, 'id', FILTER_VALIDATE_INT);
-$message = '';
 
-if (!$test_id) {
-    die("Invalid Test ID specified.");
-}
-
+// --- Setup tables and sample test ---
 try {
-    // --- Handle Test Submission ---
-    if ($_SERVER["REQUEST_METHOD"] == "POST") {
-        $answers = $_POST['answers'] ?? 'No answer provided.';
-        $marks = rand(70, 95); // Placeholder: assign a random mark
-        
-        $sql = "INSERT INTO ia_results (student_id, qp_id, marks, content) 
-                VALUES (:student_id, :qp_id, :marks, :content)
-                ON CONFLICT (student_id, qp_id) DO UPDATE SET
-                marks = EXCLUDED.marks, content = EXCLUDED.content";
-                
-        $stmt = $pdo->prepare($sql);
-        $stmt->execute([
-            ':student_id' => $student_id,
-            ':qp_id' => $test_id,
-            ':marks' => $marks,
-            ':content' => $answers
-        ]);
-        
-        $message = "<p class='message success'>Your test has been submitted successfully! <a href='student-dashboard.php'>Back to Dashboard</a></p>";
+    // Create question_papers table
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS question_papers (
+            id SERIAL PRIMARY KEY,
+            title VARCHAR(255) NOT NULL,
+            content TEXT NOT NULL,
+            staff_id INT DEFAULT 1,
+            subject_id INT DEFAULT 1
+        )
+    ");
+
+    // Create ia_results table
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS ia_results (
+            id SERIAL PRIMARY KEY,
+            student_id INT NOT NULL,
+            qp_id INT NOT NULL,
+            marks INT,
+            content TEXT,
+            UNIQUE(student_id, qp_id)
+        )
+    ");
+
+    // Insert a sample test if none exists
+    $stmt = $pdo->query("SELECT COUNT(*) FROM question_papers");
+    if ($stmt->fetchColumn() == 0) {
+        $pdo->exec("
+            INSERT INTO question_papers (title, content, staff_id, subject_id)
+            VALUES (
+                'Sample Test',
+                '1. What is PHP?\n2. Explain sessions.\n3. Write a SQL query to select all students.',
+                1,
+                1
+            )
+        ");
     }
 
-    // --- Fetch Test Content ---
-    $stmt = $pdo->prepare("SELECT title, content FROM question_papers WHERE id = :id");
+    // If no ID provided, pick first test automatically
+    if (!$test_id) {
+        $stmt = $pdo->query("SELECT id FROM question_papers ORDER BY id ASC LIMIT 1");
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        $test_id = $row['id'] ?? 0;
+    }
+
+    if (!$test_id) {
+        die("No test available.");
+    }
+
+    // --- Fetch test content ---
+    $stmt = $pdo->prepare("SELECT * FROM question_papers WHERE id = :id");
     $stmt->execute([':id' => $test_id]);
     $test = $stmt->fetch(PDO::FETCH_ASSOC);
 
     if (!$test) {
         die("Test not found.");
     }
-    
-    // Check if test was already submitted
-    $check_stmt = $pdo->prepare("SELECT id FROM ia_results WHERE student_id = :student_id AND qp_id = :qp_id");
-    $check_stmt->execute([':student_id' => $student_id, ':qp_id' => $test_id]);
-    if ($check_stmt->fetch()) {
-        $message = "<p class='message error'>You have already submitted this test. <a href='student-dashboard.php'>Back to Dashboard</a></p>";
+
+    // Decode the JSON content into questions array
+    $questions = json_decode($test['content'], true);
+    if (!$questions || !is_array($questions)) {
+        die("Invalid test content.");
     }
 
+    // --- Check if already submitted ---
+    $stmt = $pdo->prepare("SELECT id FROM ia_results WHERE student_id = :student_id AND qp_id = :qp_id");
+    $stmt->execute([':student_id' => $student_id, ':qp_id' => $test_id]);
+    $submitted = $stmt->fetch();
+
+    // --- Handle test submission ---
+    $message = '';
+    if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$submitted) {
+        $answers = $_POST['answers'] ?? [];
+        // Calculate marks based on correct answers
+        $total_marks = 0;
+        $max_marks = count($questions);
+        foreach ($questions as $index => $question) {
+            $user_answer = $answers[$index] ?? '';
+            if ($user_answer === $question['correct']) {
+                $total_marks += $question['marks'];
+            }
+        }
+
+        $answers_json = json_encode($answers);
+
+        $sql = "INSERT INTO ia_results (student_id, qp_id, marks, content)
+                VALUES (:student_id, :qp_id, :marks, :content)
+                ON CONFLICT (student_id, qp_id)
+                DO UPDATE SET marks = EXCLUDED.marks, content = EXCLUDED.content";
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute([
+            ':student_id' => $student_id,
+            ':qp_id' => $test_id,
+            ':marks' => $total_marks,
+            ':content' => $answers_json
+        ]);
+
+        $message = "<p style='color:green;'>Test submitted successfully! You scored {$total_marks}/{$max_marks}. <a href='dashboard.php'>Back to Dashboard</a></p>";
+        $submitted = true; // Mark as submitted to prevent further display
+    }
 
 } catch (PDOException $e) {
-    die("Database error: " . htmlspecialchars($e->getMessage()));
+    die("Database error: " . $e->getMessage());
 }
 ?>
 
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <title>Take Test: <?= htmlspecialchars($test['title']) ?></title>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-        :root { --space-cadet: #2b2d42; --cool-gray: #8d99ae; --antiflash-white: #edf2f4; --red-pantone: #ef233c; --fire-engine-red: #d90429; }
-        body { font-family: 'Segoe UI', sans-serif; margin: 0; padding: 20px; background: var(--space-cadet); color: var(--antiflash-white); }
-        .back-link { display: block; max-width: 1000px; margin: 0 auto 20px auto; text-align: right; font-weight: bold; color: var(--antiflash-white); text-decoration: none; }
-        .back-link:hover { text-decoration: underline; }
-        .container { max-width: 1000px; margin: 20px auto; padding: 30px; background: rgba(141, 153, 174, 0.1); border-radius: 15px; border: 1px solid rgba(141, 153, 174, 0.2); }
-        .question-paper { background: #fff; color: #333; padding: 30px; border-radius: 8px; }
-        .question-paper h1 { margin-top: 0; }
-        .question-paper .content { font-size: 1.1em; line-height: 1.7; white-space: pre-wrap; /* Preserves formatting */ }
-        textarea { width: 100%; min-height: 200px; padding: 10px; font-size: 1em; border: 1px solid var(--cool-gray); border-radius: 5px; margin-top: 20px; }
-        button { padding: 12px 20px; border: none; border-radius: 5px; background-color: var(--fire-engine-red); color: var(--antiflash-white); font-weight: bold; cursor: pointer; width: 100%; font-size: 1.1em; margin-top: 20px; }
-        button:hover { background-color: var(--red-pantone); }
-        .message { padding: 10px; border-radius: 5px; margin-bottom: 1em; text-align: center; font-weight: bold; }
-        .success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
-        .error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
-        .message a { color: #0056b3; font-weight: bold; }
-    </style>
+<meta charset="UTF-8">
+<title>Take Test: <?= htmlspecialchars($test['title']) ?></title>
+<style>
+body { font-family: Arial, sans-serif; padding: 20px; background: #f0f0f0; }
+.container { max-width: 800px; margin: auto; background: #fff; padding: 20px; border-radius: 8px; }
+.question { margin-bottom: 20px; padding: 10px; border: 1px solid #ddd; }
+.options { margin-left: 20px; }
+button { padding: 10px 20px; margin-top: 10px; }
+.message { font-weight: bold; margin-bottom: 15px; }
+</style>
 </head>
 <body>
-    <a href="student-dashboard.php" class="back-link">&laquo; Back to Dashboard</a>
+<div class="container">
+    <a href="dashboard.php">&laquo; Back to Dashboard</a>
+    <h1><?= htmlspecialchars($test['title']) ?></h1>
 
-    <div class="container">
-        <?php if (!empty($message)): ?>
-            <div class="message-container"><?= $message ?></div>
-        <?php else: ?>
-            <div class="question-paper">
-                <h1><?= htmlspecialchars($test['title']) ?></h1>
-                <hr style="margin: 15px 0;">
-                <div class="content"><?= nl2br(htmlspecialchars($test['content'])) ?></div>
-            </div>
-
-            <form method="POST">
-                <label for="answers" style="font-weight: bold; font-size: 1.2em; margin-top: 20px; display: block;">Your Answers:</label>
-                <textarea id="answers" name="answers" placeholder="Type your answers here..."></textarea>
-                <button type="submit">Submit Test</button>
-            </form>
-        <?php endif; ?>
-    </div>
+    <?php if ($message): ?>
+        <div class="message"><?= $message ?></div>
+    <?php elseif ($submitted): ?>
+        <div class="message"><p style='color:red;'>You have already submitted this test. <a href='dashboard.php'>Back to Dashboard</a></p></div>
+    <?php else: ?>
+        <form method="POST">
+            <?php foreach ($questions as $index => $question): ?>
+                <div class="question">
+                    <p><strong>Question <?= $index + 1 ?>:</strong> <?= htmlspecialchars($question['question']) ?> (<?= $question['marks'] ?> mark<?= $question['marks'] > 1 ? 's' : '' ?>)</p>
+                    <div class="options">
+                        <?php foreach ($question['options'] as $key => $option): ?>
+                            <label>
+                                <input type="radio" name="answers[<?= $index ?>]" value="<?= htmlspecialchars($key) ?>" required>
+                                <?= htmlspecialchars($key) ?>. <?= htmlspecialchars($option) ?>
+                            </label><br>
+                        <?php endforeach; ?>
+                    </div>
+                </div>
+            <?php endforeach; ?>
+            <button type="submit">Submit Test</button>
+        </form>
+    <?php endif; ?>
+</div>
 </body>
 </html>
