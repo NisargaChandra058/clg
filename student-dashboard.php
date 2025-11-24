@@ -1,18 +1,17 @@
 <?php
-
 // student-dashboard.php
 
 error_reporting(E_ALL);
-ini_set('display_errors', 1);
-
+ini_set('display_errors', 0); // hide raw errors from users in production
 session_start();
 
-require_once('db.php'); // PDO connection ($pdo)
+require_once('db.php'); // should initialize $pdo (PDO instance)
 
-// Ensure PDO throws exceptions
-$pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+// Ensure PDO throws exceptions (safe to set here even if already set)
+if (isset($pdo) && $pdo instanceof PDO) {
+    $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+}
 
-// Check login
 if (!isset($_SESSION['student_id'])) {
     header('Location: student-login.php');
     exit;
@@ -27,17 +26,18 @@ $student_name = 'Student';
 $page_error = '';
 
 try {
-
-    // Fetch student details
+    // 1) Student record
     $stmt = $pdo->prepare("SELECT student_name, email, class_id FROM students WHERE id = :id LIMIT 1");
     $stmt->execute([':id' => $student_id]);
     $student = $stmt->fetch(PDO::FETCH_ASSOC);
 
-    if ($student) {
+    if (!$student) {
+        $page_error = "Student record not found.";
+    } else {
         $student_name = $student['student_name'] ?? $student_name;
         $class_id = $student['class_id'] ?? null;
 
-        // Fetch tests
+        // 2) Tests for class (if class_id present)
         if ($class_id) {
             $test_stmt = $pdo->prepare("
                 SELECT qp.id, qp.title
@@ -50,27 +50,29 @@ try {
             $tests = $test_stmt->fetchAll(PDO::FETCH_ASSOC);
         }
 
-        // Fetch results
+        // 3) Completed results for this student
+        // NOTE: ia_results does not have created_at in your DB (error). We therefore
+        // do NOT select ir.created_at and we order by ir.id DESC to show recent results first.
+        // If your results table has a timestamp column (e.g. submitted_at), replace ir.id with it.
         $results_stmt = $pdo->prepare("
-            SELECT 
-                s.name AS subject_name,
+            SELECT
+                COALESCE(s.name, '—') AS subject_name,
                 qp.title AS test_name,
-                ir.marks,
-                ir.created_at
+                ir.marks
             FROM ia_results ir
             JOIN question_papers qp ON ir.qp_id = qp.id
             LEFT JOIN subjects s ON qp.subject_id = s.id
             WHERE ir.student_id = :student_id
-            ORDER BY ir.created_at DESC
+            ORDER BY ir.id DESC
             LIMIT 50
         ");
         $results_stmt->execute([':student_id' => $student_id]);
         $results = $results_stmt->fetchAll(PDO::FETCH_ASSOC);
 
-        // Fetch attendance
+        // 4) Attendance summary (tolerant)
         try {
             $att_sql = "
-                SELECT 
+                SELECT
                     COALESCE(sub.name, 'Unknown Subject') AS subject_name,
                     SUM(CASE WHEN a.status IN (1, '1', 'present', 'P', 'p') THEN 1 ELSE 0 END) AS present_count,
                     COUNT(*) AS total_count
@@ -97,27 +99,40 @@ try {
                 ];
             }
 
+            // If empty, try alternative attendance table
+            if (empty($attendance_summary)) {
+                $alt_sql = "
+                    SELECT subject as subject_name, SUM(CASE WHEN is_present THEN 1 ELSE 0 END) as present_count, COUNT(*) as total_count
+                    FROM attendance_records
+                    WHERE student_id = :student_id
+                    GROUP BY subject
+                    ORDER BY subject
+                ";
+                $alt_stmt = $pdo->prepare($alt_sql);
+                $alt_stmt->execute([':student_id' => $student_id]);
+                $alt_rows = $alt_stmt->fetchAll(PDO::FETCH_ASSOC);
+                foreach ($alt_rows as $r) {
+                    $present = (int)$r['present_count'];
+                    $total = (int)$r['total_count'];
+                    $percent = $total > 0 ? round(($present / $total) * 100, 2) : 0;
+                    $attendance_summary[] = [
+                        'subject' => $r['subject_name'],
+                        'present' => $present,
+                        'total'   => $total,
+                        'percent' => $percent
+                    ];
+                }
+            }
         } catch (PDOException $attEx) {
-            $page_error .= "<br><strong>DEBUG (Attendance Query Error):</strong> " . $attEx->getMessage();
+            // non-fatal: log and continue
+            error_log("[student-dashboard][attendance] " . $attEx->getMessage());
         }
-
-    } else {
-        $page_error = "Student record not found.";
     }
 
 } catch (PDOException $e) {
-
-    // Base message
+    // Friendly message for users, but log full detail on server
     $page_error = "Error: Could not retrieve data at this time. Please try again later.";
-
-    // Debug info (IMPORTANT: remove after fixing)
-    $page_error .= "<br><br><strong>DEV DEBUG:</strong> " . htmlspecialchars($e->getMessage());
-    $page_error .= "<br><strong>File:</strong> " . htmlspecialchars($e->getFile());
-    $page_error .= "<br><strong>Line:</strong> " . $e->getLine();
-    $page_error .= "<br><strong>SQLSTATE:</strong> " . $e->getCode();
-
-    // Log to server
-    error_log("[student-dashboard] " . $e->getMessage());
+    error_log("[student-dashboard] PDOException: " . $e->getMessage() . " in " . $e->getFile() . ":" . $e->getLine());
 }
 
 // Prepare chart data
@@ -127,56 +142,173 @@ foreach ($attendance_summary as $row) {
     $chart_labels[] = $row['subject'];
     $chart_data[] = $row['percent'];
 }
-
 ?>
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Student Dashboard (DEBUG MODE)</title>
+    <title>Student Dashboard</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <style>
+        :root { --space-cadet: #2b2d42; --cool-gray: #8d99ae; --antiflash-white: #edf2f4; --fire-engine-red: #d90429; }
+        body { font-family: 'Segoe UI', sans-serif; margin: 0; padding: 20px; background: var(--space-cadet); color: var(--antiflash-white); }
+        .navbar{display:flex;justify-content:space-between;align-items:center;max-width:1200px;margin:0 auto 20px;padding:10px 20px;background:rgba(141,153,174,0.08);border-radius:10px;}
+        .logout-btn{padding:8px 12px;background:var(--fire-engine-red);color:#fff;text-decoration:none;border-radius:5px;font-weight:bold;}
+        .layout{max-width:1200px;margin:0 auto;display:grid;grid-template-columns:1fr 420px;gap:20px;align-items:start;}
+        @media(max-width:980px){.layout{grid-template-columns:1fr;}}
+        .card{background:rgba(141,153,174,0.06);padding:18px;border-radius:10px;border:1px solid rgba(141,153,174,0.12);}
+        .test-list{list-style:none;padding:0;margin:0;}
+        .test-list li{background:rgba(43,45,66,0.5);border-radius:8px;margin-bottom:10px;}
+        .test-list a{display:block;padding:14px 18px;color:var(--antiflash-white);text-decoration:none;font-weight:bold;}
+        .results-table{width:100%;border-collapse:collapse;margin-top:10px;background:#fff;color:var(--space-cadet);border-radius:8px;overflow:hidden;}
+        .results-table th,.results-table td{padding:12px 14px;border-bottom:1px solid #eee;text-align:left;}
+        .results-table th{background:var(--space-cadet);color:var(--antiflash-white);}
+        .no-data{color:var(--cool-gray);padding:12px;background:rgba(255,255,255,0.04);border-radius:6px;}
+        .muted{color:var(--cool-gray);font-size:0.95rem;}
+        .message.error{background-color:#f8d7da;color:#721c24;border:1px solid #f5c6cb;padding:10px;border-radius:5px;}
+    </style>
 </head>
-<body style="font-family: Arial; padding:20px; background:#111; color:#fff;">
-
-<h1>Welcome, <?= htmlspecialchars($student_name) ?></h1>
-
-<?php if (!empty($page_error)): ?>
-    <div style="background:#ffdddd; color:#900; padding:15px; border-radius:5px; margin-bottom:20px;">
-        <?= $page_error ?>
+<body>
+    <div class="navbar">
+        <h1>Welcome, <?= htmlspecialchars($student_name) ?>!</h1>
+        <a href="logout.php" class="logout-btn">Logout</a>
     </div>
-<?php endif; ?>
 
-<h2>Available Tests</h2>
-<?php if (empty($tests)): ?>
-    <p>No tests available.</p>
-<?php else: ?>
-    <ul>
-        <?php foreach ($tests as $t): ?>
-            <li><?= htmlspecialchars($t['title']) ?></li>
-        <?php endforeach; ?>
-    </ul>
-<?php endif; ?>
+    <?php if (!empty($page_error)): ?>
+        <div style="max-width:1200px;margin:0 auto;padding:0 20px 20px;">
+            <div class="card message error"><?= htmlspecialchars($page_error) ?></div>
+        </div>
+    <?php endif; ?>
 
-<h2>Results</h2>
-<?php if (empty($results)): ?>
-    <p>No results found.</p>
-<?php else: ?>
-    <ul>
-        <?php foreach ($results as $r): ?>
-            <li><?= htmlspecialchars($r['subject_name']) ?> — <?= htmlspecialchars($r['marks']) ?></li>
-        <?php endforeach; ?>
-    </ul>
-<?php endif; ?>
+    <div class="layout" role="main" aria-live="polite">
+        <div>
+            <div class="card tests">
+                <h2 style="margin-top:0;">Available Tests</h2>
+                <?php if (empty($tests)): ?>
+                    <div class="no-data">You have no new tests assigned at this time.</div>
+                <?php else: ?>
+                    <ul class="test-list" aria-label="Available tests">
+                        <?php foreach ($tests as $test): ?>
+                            <li><a href="take-test.php?id=<?= htmlspecialchars($test['id']) ?>">Take Test: <?= htmlspecialchars($test['title']) ?></a></li>
+                        <?php endforeach; ?>
+                    </ul>
+                <?php endif; ?>
+            </div>
 
-<h2>Attendance</h2>
-<?php if (empty($attendance_summary)): ?>
-    <p>No attendance data.</p>
-<?php else: ?>
-    <ul>
-        <?php foreach ($attendance_summary as $row): ?>
-            <li><?= $row['subject'] ?> — <?= $row['percent'] ?>%</li>
-        <?php endforeach; ?>
-    </ul>
-<?php endif; ?>
+            <div class="card">
+                <h2 style="margin-top:0;">My Recent Results</h2>
+                <?php if (empty($results)): ?>
+                    <div class="no-data">You have not completed any tests yet.</div>
+                <?php else: ?>
+                    <table class="results-table" role="table">
+                        <thead>
+                            <tr>
+                                <th>Subject</th>
+                                <th>Test Name</th>
+                                <th>Marks Obtained</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php foreach ($results as $result): ?>
+                                <tr>
+                                    <td><?= htmlspecialchars($result['subject_name'] ?? '—') ?></td>
+                                    <td><?= htmlspecialchars($result['test_name'] ?? '—') ?></td>
+                                    <td><?= htmlspecialchars($result['marks'] ?? '—') ?></td>
+                                </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                <?php endif; ?>
+            </div>
+        </div>
 
+        <aside>
+            <div class="card">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+                    <div>
+                        <h2 style="margin:0;">Attendance</h2>
+                        <div class="muted">Subject-wise attendance percentage</div>
+                    </div>
+                </div>
+
+                <?php if (empty($attendance_summary)): ?>
+                    <div class="no-data">Attendance data not available for your account.</div>
+                    <div class="muted" style="margin-top:8px;">If you believe this is incorrect, ensure attendance is recorded in the <code>attendance</code> table (student_id, subject_id, status).</div>
+                <?php else: ?>
+                    <canvas id="attendanceChart" width="400" height="300" aria-label="Attendance chart" role="img"></canvas>
+
+                    <div style="margin-top:12px;">
+                        <table style="width:100%;border-collapse:collapse;background:#fff;color:var(--space-cadet);border-radius:6px;overflow:hidden;">
+                            <thead>
+                                <tr>
+                                    <th style="padding:8px 10px;background:var(--space-cadet);color:var(--antiflash-white);text-align:left">Subject</th>
+                                    <th style="padding:8px 10px;background:var(--space-cadet);color:var(--antiflash-white);text-align:right">Present</th>
+                                    <th style="padding:8px 10px;background:var(--space-cadet);color:var(--antiflash-white);text-align:right">Total</th>
+                                    <th style="padding:8px 10px;background:var(--space-cadet);color:var(--antiflash-white);text-align:right">%</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach ($attendance_summary as $row): ?>
+                                    <tr>
+                                        <td style="padding:8px 10px;border-bottom:1px solid #eee;"><?= htmlspecialchars($row['subject']) ?></td>
+                                        <td style="padding:8px 10px;border-bottom:1px solid #eee;text-align:right;"><?= htmlspecialchars($row['present']) ?></td>
+                                        <td style="padding:8px 10px;border-bottom:1px solid #eee;text-align:right;"><?= htmlspecialchars($row['total']) ?></td>
+                                        <td style="padding:8px 10px;border-bottom:1px solid #eee;text-align:right;"><?= htmlspecialchars($row['percent']) ?>%</td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                <?php endif; ?>
+            </div>
+        </aside>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script>
+    (function() {
+        const labels = <?= json_encode($chart_labels) ?>;
+        const data = <?= json_encode($chart_data) ?>;
+        if (labels && labels.length && data && data.length) {
+            const ctx = document.getElementById('attendanceChart').getContext('2d');
+            new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'Attendance (%)',
+                        data: data,
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            max: 100,
+                            ticks: { callback: function(value){ return value + "%"; } },
+                            title: { display: true, text: 'Percentage' }
+                        }
+                    },
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    let label = context.dataset.label || '';
+                                    if (label) label += ': ';
+                                    if (context.parsed.y !== null) label += context.parsed.y + '%';
+                                    return label;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    })();
+    </script>
 </body>
 </html>
