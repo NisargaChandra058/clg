@@ -25,11 +25,13 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
         try {
             $pdo->beginTransaction();
 
-            // Note: Ensure your DB has columns: name, subject_code, branch, semester_id, year
-            // Changed :semester to :semester_id based on previous context, change back if using 'semester' column
+            // ---------------------------------------------------------
+            // FIX: Insert into BOTH 'semester' AND 'semester_id'
+            // This satisfies the NOT NULL constraint on the 'semester' column
+            // ---------------------------------------------------------
             $sql = "
-                INSERT INTO subjects (name, subject_code, branch, semester_id, year)
-                VALUES (:subject_name, :subject_code, :branch, :semester, :year)
+                INSERT INTO subjects (name, subject_code, branch, semester, semester_id, year)
+                VALUES (:subject_name, :subject_code, :branch, :semester, :semester, :year)
                 ON CONFLICT (subject_code) DO NOTHING
             ";
             $stmt = $pdo->prepare($sql);
@@ -44,7 +46,7 @@ if ($_SERVER["REQUEST_METHOD"] === "POST") {
                         ':subject_name' => $subject_name,
                         ':subject_code' => $subject_code,
                         ':branch'       => $branch,
-                        ':semester'     => $semester, // or semester_id
+                        ':semester'     => $semester, // Saves to both columns
                         ':year'         => $year
                     ]);
 
