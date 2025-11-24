@@ -1,247 +1,118 @@
 <?php
-require_once('db.php'); // Database connection (PDO in $pdo)
+session_start();
+require_once('db.php');
 
 $message = '';
 
+// HANDLE ASSIGNMENT
 if ($_SERVER["REQUEST_METHOD"] == "POST") {
-    $semester_id = filter_input(INPUT_POST, 'semester_id', FILTER_VALIDATE_INT);
-    $subject_id = filter_input(INPUT_POST, 'subject_id', FILTER_VALIDATE_INT);
+    $qp_id = filter_input(INPUT_POST, 'qp_id', FILTER_VALIDATE_INT);
     $selected_students = $_POST['students'] ?? [];
 
-    if ($semester_id && $subject_id && !empty($selected_students)) {
+    if ($qp_id && !empty($selected_students)) {
         try {
             $pdo->beginTransaction();
-
-            // PostgreSQL insert with ON CONFLICT skip duplicates
-            $stmt = $pdo->prepare("
-                INSERT INTO student_subject_allocation (student_id, subject_id)
-                VALUES (:student_id, :subject_id)
-                ON CONFLICT (student_id, subject_id) DO NOTHING
-            ");
-
-            $assigned_count = 0;
-            foreach ($selected_students as $student_id) {
-                if (filter_var($student_id, FILTER_VALIDATE_INT)) {
-                    $stmt->execute([
-                        ':student_id' => $student_id,
-                        ':subject_id' => $subject_id
-                    ]);
-                    if ($stmt->rowCount() > 0) {
-                        $assigned_count++;
-                    }
-                }
+            $stmt = $pdo->prepare("INSERT INTO student_test_allocation (student_id, qp_id) VALUES (:sid, :qid) ON CONFLICT (student_id, qp_id) DO NOTHING");
+            $count = 0;
+            foreach ($selected_students as $sid) {
+                $stmt->execute([':sid' => $sid, ':qid' => $qp_id]);
+                if ($stmt->rowCount() > 0) $count++;
             }
-
             $pdo->commit();
-            $message = "<p class='message success'>✅ Assigned subject to $assigned_count new student(s)!</p>";
-        } catch (PDOException $e) {
+            $message = "<div class='msg success'>✅ Assigned to $count student(s)!</div>";
+        } catch (Exception $e) {
             $pdo->rollBack();
-            $message = "<p class='message error'>❌ Database error: " . htmlspecialchars($e->getMessage()) . "</p>";
+            $message = "<div class='msg error'>Error: " . $e->getMessage() . "</div>";
         }
     } else {
-        $message = "<p class='message error'>⚠️ Please select a semester, subject, and at least one student.</p>";
+        $message = "<div class='msg error'>Select a Test and Students.</div>";
     }
 }
 
-// --- Fetch dropdown data ---
-try {
-    $semesters = $pdo->query("SELECT id, name FROM semesters ORDER BY name")->fetchAll(PDO::FETCH_ASSOC);
+// FETCH DATA
+$semesters = $pdo->query("SELECT id, name FROM semesters ORDER BY name")->fetchAll();
+// Subjects
+$sub_res = $pdo->query("SELECT id, name, semester_id FROM subjects WHERE semester_id IS NOT NULL");
+$subs_by_sem = [];
+foreach($sub_res as $r) $subs_by_sem[$r['semester_id']][] = $r;
+// Question Papers
+$qp_res = $pdo->query("SELECT id, title, subject_id FROM question_papers WHERE subject_id IS NOT NULL");
+$qps_by_sub = [];
+foreach($qp_res as $r) $qps_by_sub[$r['subject_id']][] = $r;
+// Students (Directly from students table)
+$stu_res = $pdo->query("SELECT id, student_name, semester FROM students WHERE semester IS NOT NULL");
+$stus_by_sem = [];
+foreach($stu_res as $r) $stus_by_sem[$r['semester']][] = $r;
 
-    // Use COALESCE to handle subjects with either semester_id or semester value
-    $subjects_stmt = $pdo->query("
-        SELECT id, name, subject_code, COALESCE(semester_id, semester) AS semester_id
-        FROM subjects
-        WHERE semester_id IS NOT NULL OR semester IS NOT NULL
-        ORDER BY name
-    ");
-    $subjects_by_semester = [];
-    while ($subject = $subjects_stmt->fetch(PDO::FETCH_ASSOC)) {
-        $subjects_by_semester[$subject['semester_id']][] = $subject;
-    }
-
-    // Fetch students grouped by semester
-    $students_stmt = $pdo->query("
-        SELECT id, student_name, semester
-        FROM students
-        WHERE semester IS NOT NULL
-        ORDER BY student_name
-    ");
-    $students_by_semester = [];
-    while ($student = $students_stmt->fetch(PDO::FETCH_ASSOC)) {
-        $students_by_semester[$student['semester']][] = $student;
-    }
-
-} catch (PDOException $e) {
-    die("Error fetching data: " . htmlspecialchars($e->getMessage()));
-}
-
-// Convert PHP arrays to JSON for JavaScript
-$subjects_json = json_encode($subjects_by_semester);
-$students_json = json_encode($students_by_semester);
+$json_subs = json_encode($subs_by_sem);
+$json_qps = json_encode($qps_by_sub);
+$json_stus = json_encode($stus_by_sem);
 ?>
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Assign Subject to Students</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Assign Test</title>
     <style>
-        :root {
-            --space-cadet: #2b2d42;
-            --cool-gray: #8d99ae;
-            --antiflash-white: #edf2f4;
-            --red-pantone: #ef233c;
-            --fire-engine-red: #d90429;
-        }
-        body {
-            font-family: 'Segoe UI', sans-serif;
-            margin: 0; padding: 20px;
-            background: var(--space-cadet);
-            color: var(--antiflash-white);
-        }
-        .container {
-            max-width: 700px;
-            margin: 20px auto;
-            padding: 30px;
-            background: rgba(141,153,174,0.1);
-            border-radius: 15px;
-            border: 1px solid rgba(141,153,174,0.2);
-        }
-        h2 { text-align: center; margin-bottom: 20px; }
-        form { display: flex; flex-direction: column; gap: 10px; }
-        label { font-weight: bold; }
-        select, button {
-            padding: 10px;
-            border-radius: 5px;
-            border: 1px solid var(--cool-gray);
-            background: rgba(43,45,66,0.5);
-            color: var(--antiflash-white);
-        }
-        select:disabled {
-            background: rgba(43,45,66,0.2);
-            color: var(--cool-gray);
-        }
-        button {
-            background-color: var(--fire-engine-red);
-            border: none;
-            cursor: pointer;
-            font-weight: bold;
-            font-size: 1em;
-        }
-        button:hover { background-color: var(--red-pantone); }
-        .message {
-            text-align: center;
-            padding: 10px;
-            border-radius: 5px;
-            font-weight: bold;
-        }
-        .success { background: #d4edda; color: #155724; }
-        .error { background: #f8d7da; color: #721c24; }
-        .students-list {
-            background: rgba(255,255,255,0.05);
-            border-radius: 10px;
-            padding: 10px;
-            max-height: 300px;
-            overflow-y: auto;
-            border: 1px solid var(--cool-gray);
-        }
-        .student-item {
-            display: flex;
-            align-items: center;
-            padding: 4px 0;
-        }
-        .student-item label {
-            font-weight: normal;
-        }
+        body{font-family:sans-serif;padding:20px;background:#2b2d42;color:white;}
+        .container{max-width:800px;margin:auto;background:rgba(255,255,255,0.1);padding:20px;border-radius:10px;}
+        select,button{width:100%;padding:10px;margin-top:5px;border-radius:5px;}
+        .student-box{background:rgba(0,0,0,0.3);padding:10px;max-height:300px;overflow-y:auto;margin-top:10px;}
+        .msg{padding:10px;text-align:center;margin-bottom:10px;border-radius:5px;font-weight:bold;}
+        .success{background:#d4edda;color:#155724;} .error{background:#f8d7da;color:#721c24;}
     </style>
 </head>
 <body>
-
 <div class="container">
-    <h2>Assign Subject to Students</h2>
-    <?php if (!empty($message)) echo $message; ?>
-
-    <form method="POST" action="assign-subject-student.php">
-        <label for="semester_id">Select Semester:</label>
-        <select name="semester_id" id="semester_id" required>
-            <option value="">-- Select Semester --</option>
-            <?php foreach ($semesters as $sem): ?>
-                <option value="<?= htmlspecialchars($sem['id']) ?>"><?= htmlspecialchars($sem['name']) ?></option>
-            <?php endforeach; ?>
+    <h2>Assign Test</h2>
+    <?= $message ?>
+    <form method="POST">
+        <label>1. Semester:</label>
+        <select id="sem_id"><option value="">-- Select --</option>
+            <?php foreach($semesters as $s): ?><option value="<?=$s['id']?>"><?=$s['name']?></option><?php endforeach; ?>
         </select>
 
-        <label for="subject_id">Select Subject:</label>
-        <select name="subject_id" id="subject_id" required disabled>
-            <option value="">-- First select a Semester --</option>
-        </select>
+        <label>2. Subject:</label><select id="sub_id" disabled></select>
+        <label>3. Test:</label><select id="qp_id" name="qp_id" disabled required></select>
 
-        <div id="students_section" style="display:none;">
-            <label>Students (checked = assign):</label>
-            <div class="students-list" id="students_list"></div>
+        <div id="stu_div" style="display:none;">
+            <label>4. Students:</label>
+            <div id="stu_list" class="student-box"></div>
         </div>
 
-        <button type="submit">Assign Selected Students</button>
+        <button id="btn" disabled>Assign</button>
     </form>
 </div>
-
 <script>
-const subjectsBySemester = <?= $subjects_json ?>;
-const studentsBySemester = <?= $students_json ?>;
+const subs = <?=$json_subs?:'{}'?>, qps = <?=$json_qps?:'{}'?>, stus = <?=$json_stus?:'{}'?>;
+const elSem=document.getElementById('sem_id'), elSub=document.getElementById('sub_id'), elQp=document.getElementById('qp_id'), elList=document.getElementById('stu_list'), elDiv=document.getElementById('stu_div'), elBtn=document.getElementById('btn');
 
-const semesterSelect = document.getElementById('semester_id');
-const subjectSelect = document.getElementById('subject_id');
-const studentsSection = document.getElementById('students_section');
-const studentsList = document.getElementById('students_list');
+elSem.onchange = function(){
+    const id = this.value;
+    elSub.innerHTML='<option value="">-- Select Subject --</option>'; elSub.disabled=true;
+    elQp.innerHTML='<option value="">-- Select Test --</option>'; elQp.disabled=true;
+    elList.innerHTML=''; elDiv.style.display='none'; elBtn.disabled=true;
+    if(!id)return;
 
-semesterSelect.addEventListener('change', function() {
-    const semId = this.value;
-
-    // Reset subject dropdown
-    subjectSelect.innerHTML = '<option value="">-- Select Subject --</option>';
-    subjectSelect.disabled = true;
-
-    // Reset students
-    studentsList.innerHTML = '';
-    studentsSection.style.display = 'none';
-
-    // ✅ Populate Subjects (support COALESCE mapping)
-    if (semId && subjectsBySemester[semId]) {
-        subjectSelect.disabled = false;
-        subjectsBySemester[semId].forEach(sub => {
-            const opt = document.createElement('option');
-            opt.value = sub.id;
-            opt.textContent = `${sub.subject_code} - ${sub.name}`;
-            subjectSelect.appendChild(opt);
+    if(subs[id]){ elSub.disabled=false; subs[id].forEach(s=>elSub.add(new Option(s.name,s.id))); }
+    if(stus[id]){
+        elDiv.style.display='block';
+        stus[id].forEach(s=>{
+            elList.innerHTML += `<div><label><input type="checkbox" name="students[]" value="${s.id}" checked> ${s.student_name}</label></div>`;
         });
-
-        // Auto-select the first subject
-        if (subjectSelect.options.length > 1) {
-            subjectSelect.selectedIndex = 1;
-        }
     } else {
-        console.warn("No subjects found for semester ID:", semId);
+        elDiv.style.display='block'; elList.innerHTML='No students found.';
     }
+};
 
-    // ✅ Populate Students
-    if (semId && studentsBySemester[semId]) {
-        studentsSection.style.display = 'block';
-        studentsBySemester[semId].forEach(stu => {
-            const div = document.createElement('div');
-            div.className = 'student-item';
-            div.innerHTML = `
-                <label>
-                    <input type="checkbox" name="students[]" value="${stu.id}" checked>
-                    ${stu.student_name}
-                </label>
-            `;
-            studentsList.appendChild(div);
-        });
-    } else if (semId) {
-        studentsSection.style.display = 'block';
-        studentsList.innerHTML = '<p style="padding:10px;text-align:center;">No students found for this semester.</p>';
-    }
-});
+elSub.onchange = function(){
+    const id = this.value;
+    elQp.innerHTML='<option value="">-- Select Test --</option>'; elQp.disabled=true; elBtn.disabled=true;
+    if(!id)return;
+    if(qps[id]){ elQp.disabled=false; qps[id].forEach(q=>elQp.add(new Option(q.title,q.id))); }
+};
+
+elQp.onchange = function(){ elBtn.disabled = !this.value; };
 </script>
 </body>
 </html>
