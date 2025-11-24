@@ -177,40 +177,42 @@ $subjects_json = json_encode($subjects_by_sem, JSON_HEX_TAG|JSON_HEX_APOS|JSON_H
     // The JSON data grouped by semester_id
     const subjectsBySemester = <?= $subjects_json ?: '{}' ?>;
     
+    console.log("Loaded Subjects Data:", subjectsBySemester); // DEBUG: Check console
+
     const semesterSelect = document.getElementById('semester_select');
     const subjectSelect = document.getElementById('subject_select');
 
     // Listen for semester changes
     semesterSelect.addEventListener('change', function() {
         const semesterId = this.value;
-        
+        console.log("Selected Semester ID:", semesterId); // DEBUG
+
         // Reset Subject Dropdown
         subjectSelect.innerHTML = '<option value="">-- Select Subject --</option>';
         subjectSelect.disabled = true;
 
-        if (!semesterId) return; // If nothing selected, stop
+        if (!semesterId) return;
 
-        // Get list of subjects for this semester ID
-        const subjects = subjectsBySemester[semesterId];
+        // Get list of subjects
+        // Note: keys in JSON might be strings "1", "2", check console log
+        const subjects = subjectsBySemester[semesterId]; 
 
         if (subjects && subjects.length > 0) {
-            // Enable and populate
+            console.log("Found subjects:", subjects); // DEBUG
             subjectSelect.disabled = false;
             subjects.forEach(s => {
                 const option = document.createElement('option');
                 option.value = s.id;
-                // Show Code + Name (e.g., "MAT101 - Mathematics")
                 option.textContent = (s.subject_code ? s.subject_code + ' - ' : '') + s.subject_name;
                 subjectSelect.appendChild(option);
             });
         } else {
-            // No subjects found for this semester
+            console.warn("No subjects found for Semester " + semesterId); // DEBUG
             const option = document.createElement('option');
             option.text = "-- No subjects found for this semester --";
             subjectSelect.appendChild(option);
         }
     });
 </script>
-
 </body>
 </html>
