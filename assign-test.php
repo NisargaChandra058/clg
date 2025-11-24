@@ -1,273 +1,247 @@
 <?php
-session_start();
-require_once('db.php'); // PDO connection ($pdo)
-
-// --- 1. AUTO-SETUP TABLE (Self-Healing) ---
-// We create a table to link Students directly to Question Papers
-try {
-    $pdo->exec("
-        CREATE TABLE IF NOT EXISTS student_test_allocation (
-            id SERIAL PRIMARY KEY,
-            student_id INT NOT NULL,
-            qp_id INT NOT NULL,
-            assigned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(student_id, qp_id),
-            FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE,
-            FOREIGN KEY (qp_id) REFERENCES question_papers(id) ON DELETE CASCADE
-        );
-    ");
-} catch (PDOException $e) {
-    die("Setup Error: " . $e->getMessage());
-}
+require_once('db.php'); // Database connection (PDO in $pdo)
 
 $message = '';
 
-// --- 2. HANDLE FORM SUBMISSION ---
 if ($_SERVER["REQUEST_METHOD"] == "POST") {
-    $qp_id = filter_input(INPUT_POST, 'qp_id', FILTER_VALIDATE_INT);
+    $semester_id = filter_input(INPUT_POST, 'semester_id', FILTER_VALIDATE_INT);
+    $subject_id = filter_input(INPUT_POST, 'subject_id', FILTER_VALIDATE_INT);
     $selected_students = $_POST['students'] ?? [];
 
-    if ($qp_id && !empty($selected_students)) {
+    if ($semester_id && $subject_id && !empty($selected_students)) {
         try {
             $pdo->beginTransaction();
+
+            // PostgreSQL insert with ON CONFLICT skip duplicates
             $stmt = $pdo->prepare("
-                INSERT INTO student_test_allocation (student_id, qp_id) 
-                VALUES (:student_id, :qp_id) 
-                ON CONFLICT (student_id, qp_id) DO NOTHING
+                INSERT INTO student_subject_allocation (student_id, subject_id)
+                VALUES (:student_id, :subject_id)
+                ON CONFLICT (student_id, subject_id) DO NOTHING
             ");
 
-            $count = 0;
-            foreach ($selected_students as $sid) {
-                $stmt->execute([':student_id' => $sid, ':qp_id' => $qp_id]);
-                if ($stmt->rowCount() > 0) $count++;
+            $assigned_count = 0;
+            foreach ($selected_students as $student_id) {
+                if (filter_var($student_id, FILTER_VALIDATE_INT)) {
+                    $stmt->execute([
+                        ':student_id' => $student_id,
+                        ':subject_id' => $subject_id
+                    ]);
+                    if ($stmt->rowCount() > 0) {
+                        $assigned_count++;
+                    }
+                }
             }
+
             $pdo->commit();
-            $message = "<div class='message success'>✅ Test assigned to $count student(s) successfully!</div>";
+            $message = "<p class='message success'>✅ Assigned subject to $assigned_count new student(s)!</p>";
         } catch (PDOException $e) {
             $pdo->rollBack();
-            $message = "<div class='message error'>❌ Database Error: " . htmlspecialchars($e->getMessage()) . "</div>";
+            $message = "<p class='message error'>❌ Database error: " . htmlspecialchars($e->getMessage()) . "</p>";
         }
     } else {
-        $message = "<div class='message error'>⚠️ Please select a Question Paper and at least one Student.</div>";
+        $message = "<p class='message error'>⚠️ Please select a semester, subject, and at least one student.</p>";
     }
 }
 
-// --- 3. FETCH DATA FOR DROPDOWNS ---
+// --- Fetch dropdown data ---
 try {
-    // A. Semesters
     $semesters = $pdo->query("SELECT id, name FROM semesters ORDER BY name")->fetchAll(PDO::FETCH_ASSOC);
 
-    // B. Subjects (Grouped by Semester)
-    $sub_stmt = $pdo->query("SELECT id, name, subject_code, semester_id FROM subjects WHERE semester_id IS NOT NULL ORDER BY name");
-    $subjects_by_sem = [];
-    while ($row = $sub_stmt->fetch(PDO::FETCH_ASSOC)) {
-        $subjects_by_sem[$row['semester_id']][] = $row;
+    // Use COALESCE to handle subjects with either semester_id or semester value
+    $subjects_stmt = $pdo->query("
+        SELECT id, name, subject_code, COALESCE(semester_id, semester) AS semester_id
+        FROM subjects
+        WHERE semester_id IS NOT NULL OR semester IS NOT NULL
+        ORDER BY name
+    ");
+    $subjects_by_semester = [];
+    while ($subject = $subjects_stmt->fetch(PDO::FETCH_ASSOC)) {
+        $subjects_by_semester[$subject['semester_id']][] = $subject;
     }
 
-    // C. Question Papers (Grouped by Subject)
-    $qp_stmt = $pdo->query("SELECT id, title, subject_id FROM question_papers WHERE subject_id IS NOT NULL ORDER BY title");
-    $qps_by_sub = [];
-    while ($row = $qp_stmt->fetch(PDO::FETCH_ASSOC)) {
-        $qps_by_sub[$row['subject_id']][] = $row;
+    // Fetch students grouped by semester
+    $students_stmt = $pdo->query("
+        SELECT id, student_name, semester
+        FROM students
+        WHERE semester IS NOT NULL
+        ORDER BY student_name
+    ");
+    $students_by_semester = [];
+    while ($student = $students_stmt->fetch(PDO::FETCH_ASSOC)) {
+        $students_by_semester[$student['semester']][] = $student;
     }
 
-    // D. Students (Grouped by Semester)
-    $stu_stmt = $pdo->query("SELECT id, student_name, semester FROM students WHERE semester IS NOT NULL ORDER BY student_name");
-    $students_by_sem = [];
-    while ($row = $stu_stmt->fetch(PDO::FETCH_ASSOC)) {
-        $students_by_sem[$row['semester']][] = $row;
-    }
-
-} catch (Exception $e) {
-    die("Data Fetch Error: " . $e->getMessage());
+} catch (PDOException $e) {
+    die("Error fetching data: " . htmlspecialchars($e->getMessage()));
 }
 
-// Prepare JSON for JavaScript
-$json_subjects = json_encode($subjects_by_sem);
-$json_qps = json_encode($qps_by_sub);
-$json_students = json_encode($students_by_sem);
+// Convert PHP arrays to JSON for JavaScript
+$subjects_json = json_encode($subjects_by_semester);
+$students_json = json_encode($students_by_semester);
 ?>
 
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Assign Test</title>
+    <title>Assign Subject to Students</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-        :root { --bg-dark: #2b2d42; --card-bg: #3a3d55; --text-light: #edf2f4; --primary: #007bff; --success: #28a745; --danger: #dc3545; }
-        body { font-family: 'Segoe UI', sans-serif; background: var(--bg-dark); color: var(--text-light); padding: 20px; }
-        .container { max-width: 800px; margin: 0 auto; background: rgba(255,255,255,0.05); padding: 30px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.1); }
-        h2 { text-align: center; border-bottom: 2px solid var(--primary); padding-bottom: 10px; margin-bottom: 20px; }
-        
-        .form-group { margin-bottom: 20px; }
-        label { display: block; font-weight: bold; margin-bottom: 8px; color: #ccc; }
-        select { width: 100%; padding: 12px; background: #fff; border-radius: 5px; border: none; font-size: 16px; }
-        select:disabled { background: #ddd; color: #666; cursor: not-allowed; }
-
-        .student-box { background: rgba(0,0,0,0.2); padding: 15px; border-radius: 8px; max-height: 300px; overflow-y: auto; border: 1px solid #555; }
-        .student-item { padding: 8px; border-bottom: 1px solid rgba(255,255,255,0.05); display: flex; align-items: center; }
-        .student-item label { margin: 0 0 0 10px; font-weight: normal; color: #fff; cursor: pointer; width: 100%; }
-        input[type="checkbox"] { transform: scale(1.3); cursor: pointer; }
-
-        button { width: 100%; padding: 15px; background: var(--primary); color: white; border: none; border-radius: 5px; font-size: 18px; font-weight: bold; cursor: pointer; margin-top: 10px; transition: 0.3s; }
-        button:hover { background: #0056b3; }
-        button:disabled { background: #555; cursor: not-allowed; }
-
-        .message { padding: 15px; text-align: center; border-radius: 5px; margin-bottom: 20px; font-weight: bold; }
-        .success { background: rgba(40, 167, 69, 0.2); border: 1px solid var(--success); color: #2ecc71; }
-        .error { background: rgba(220, 53, 69, 0.2); border: 1px solid var(--danger); color: #ff6b6b; }
-        
-        .nav-link { display: block; text-align: right; color: #aaa; text-decoration: none; margin-bottom: 10px; }
-        .nav-link:hover { color: #fff; }
+        :root {
+            --space-cadet: #2b2d42;
+            --cool-gray: #8d99ae;
+            --antiflash-white: #edf2f4;
+            --red-pantone: #ef233c;
+            --fire-engine-red: #d90429;
+        }
+        body {
+            font-family: 'Segoe UI', sans-serif;
+            margin: 0; padding: 20px;
+            background: var(--space-cadet);
+            color: var(--antiflash-white);
+        }
+        .container {
+            max-width: 700px;
+            margin: 20px auto;
+            padding: 30px;
+            background: rgba(141,153,174,0.1);
+            border-radius: 15px;
+            border: 1px solid rgba(141,153,174,0.2);
+        }
+        h2 { text-align: center; margin-bottom: 20px; }
+        form { display: flex; flex-direction: column; gap: 10px; }
+        label { font-weight: bold; }
+        select, button {
+            padding: 10px;
+            border-radius: 5px;
+            border: 1px solid var(--cool-gray);
+            background: rgba(43,45,66,0.5);
+            color: var(--antiflash-white);
+        }
+        select:disabled {
+            background: rgba(43,45,66,0.2);
+            color: var(--cool-gray);
+        }
+        button {
+            background-color: var(--fire-engine-red);
+            border: none;
+            cursor: pointer;
+            font-weight: bold;
+            font-size: 1em;
+        }
+        button:hover { background-color: var(--red-pantone); }
+        .message {
+            text-align: center;
+            padding: 10px;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+        .success { background: #d4edda; color: #155724; }
+        .error { background: #f8d7da; color: #721c24; }
+        .students-list {
+            background: rgba(255,255,255,0.05);
+            border-radius: 10px;
+            padding: 10px;
+            max-height: 300px;
+            overflow-y: auto;
+            border: 1px solid var(--cool-gray);
+        }
+        .student-item {
+            display: flex;
+            align-items: center;
+            padding: 4px 0;
+        }
+        .student-item label {
+            font-weight: normal;
+        }
     </style>
 </head>
 <body>
 
-<a href="admin-panel.php" class="nav-link">&laquo; Back to Dashboard</a>
-
 <div class="container">
-    <h2>Assign Test / Question Paper</h2>
-    <?= $message ?>
+    <h2>Assign Subject to Students</h2>
+    <?php if (!empty($message)) echo $message; ?>
 
-    <form method="POST">
-        <!-- 1. Semester -->
-        <div class="form-group">
-            <label>1. Select Semester:</label>
-            <select id="semester_id">
-                <option value="">-- Select Semester --</option>
-                <?php foreach ($semesters as $sem): ?>
-                    <option value="<?= $sem['id'] ?>"><?= htmlspecialchars($sem['name']) ?></option>
-                <?php endforeach; ?>
-            </select>
+    <form method="POST" action="assign-subject-student.php">
+        <label for="semester_id">Select Semester:</label>
+        <select name="semester_id" id="semester_id" required>
+            <option value="">-- Select Semester --</option>
+            <?php foreach ($semesters as $sem): ?>
+                <option value="<?= htmlspecialchars($sem['id']) ?>"><?= htmlspecialchars($sem['name']) ?></option>
+            <?php endforeach; ?>
+        </select>
+
+        <label for="subject_id">Select Subject:</label>
+        <select name="subject_id" id="subject_id" required disabled>
+            <option value="">-- First select a Semester --</option>
+        </select>
+
+        <div id="students_section" style="display:none;">
+            <label>Students (checked = assign):</label>
+            <div class="students-list" id="students_list"></div>
         </div>
 
-        <!-- 2. Subject -->
-        <div class="form-group">
-            <label>2. Select Subject:</label>
-            <select id="subject_id" disabled>
-                <option value="">-- Select Semester First --</option>
-            </select>
-        </div>
-
-        <!-- 3. Question Paper -->
-        <div class="form-group">
-            <label>3. Select Question Paper (Test):</label>
-            <select id="qp_id" name="qp_id" disabled required>
-                <option value="">-- Select Subject First --</option>
-            </select>
-        </div>
-
-        <!-- 4. Students -->
-        <div class="form-group" id="student_section" style="display:none;">
-            <label>4. Select Students:</label>
-            <div class="student-box" id="student_list"></div>
-        </div>
-
-        <button type="submit" id="submit_btn" disabled>Assign Test</button>
+        <button type="submit">Assign Selected Students</button>
     </form>
 </div>
 
 <script>
-// Load PHP Data
-const subjectsData = <?= $json_subjects ?: '{}' ?>;
-const qpsData = <?= $json_qps ?: '{}' ?>;
-const studentsData = <?= $json_students ?: '{}' ?>;
+const subjectsBySemester = <?= $subjects_json ?>;
+const studentsBySemester = <?= $students_json ?>;
 
-const elSem = document.getElementById('semester_id');
-const elSub = document.getElementById('subject_id');
-const elQp = document.getElementById('qp_id');
-const elList = document.getElementById('student_list');
-const elSection = document.getElementById('student_section');
-const elBtn = document.getElementById('submit_btn');
+const semesterSelect = document.getElementById('semester_id');
+const subjectSelect = document.getElementById('subject_id');
+const studentsSection = document.getElementById('students_section');
+const studentsList = document.getElementById('students_list');
 
-// 1. On Semester Change -> Load Subjects AND Students
-elSem.addEventListener('change', function() {
+semesterSelect.addEventListener('change', function() {
     const semId = this.value;
 
-    // Reset Subject
-    elSub.innerHTML = '<option value="">-- Select Subject --</option>';
-    elSub.disabled = true;
-    
-    // Reset QP
-    elQp.innerHTML = '<option value="">-- Select Subject First --</option>';
-    elQp.disabled = true;
+    // Reset subject dropdown
+    subjectSelect.innerHTML = '<option value="">-- Select Subject --</option>';
+    subjectSelect.disabled = true;
 
-    // Reset Students
-    elList.innerHTML = '';
-    elSection.style.display = 'none';
-    elBtn.disabled = true;
+    // Reset students
+    studentsList.innerHTML = '';
+    studentsSection.style.display = 'none';
 
-    if (!semId) return;
-
-    // Populate Subjects
-    if (subjectsData[semId]) {
-        elSub.disabled = false;
-        subjectsData[semId].forEach(s => {
-            elSub.add(new Option(s.name + ' (' + s.subject_code + ')', s.id));
+    // ✅ Populate Subjects (support COALESCE mapping)
+    if (semId && subjectsBySemester[semId]) {
+        subjectSelect.disabled = false;
+        subjectsBySemester[semId].forEach(sub => {
+            const opt = document.createElement('option');
+            opt.value = sub.id;
+            opt.textContent = `${sub.subject_code} - ${sub.name}`;
+            subjectSelect.appendChild(opt);
         });
+
+        // Auto-select the first subject
+        if (subjectSelect.options.length > 1) {
+            subjectSelect.selectedIndex = 1;
+        }
     } else {
-        elSub.add(new Option("-- No subjects found --", ""));
+        console.warn("No subjects found for semester ID:", semId);
     }
 
-    // Populate Students (Immediately visible when semester selected)
-    if (studentsData[semId]) {
-        elSection.style.display = 'block';
-        
-        // Select All Header
-        let allDiv = document.createElement('div');
-        allDiv.className = 'student-item';
-        allDiv.style.borderBottom = '2px solid #777';
-        allDiv.innerHTML = `<input type="checkbox" id="select_all" checked> <label for="select_all" style="font-weight:bold">Select All Students</label>`;
-        elList.appendChild(allDiv);
-
-        studentsData[semId].forEach(s => {
-            let div = document.createElement('div');
+    // ✅ Populate Students
+    if (semId && studentsBySemester[semId]) {
+        studentsSection.style.display = 'block';
+        studentsBySemester[semId].forEach(stu => {
+            const div = document.createElement('div');
             div.className = 'student-item';
-            div.innerHTML = `<input type="checkbox" name="students[]" class="stu-chk" value="${s.id}" checked id="s_${s.id}"> <label for="s_${s.id}">${s.student_name}</label>`;
-            elList.appendChild(div);
+            div.innerHTML = `
+                <label>
+                    <input type="checkbox" name="students[]" value="${stu.id}" checked>
+                    ${stu.student_name}
+                </label>
+            `;
+            studentsList.appendChild(div);
         });
-
-        // Select All Logic
-        document.getElementById('select_all').addEventListener('change', function() {
-            document.querySelectorAll('.stu-chk').forEach(cb => cb.checked = this.checked);
-        });
-    } else {
-        elSection.style.display = 'block';
-        elList.innerHTML = '<div style="padding:10px; text-align:center; color:#ff6b6b;">No students found in this semester.</div>';
+    } else if (semId) {
+        studentsSection.style.display = 'block';
+        studentsList.innerHTML = '<p style="padding:10px;text-align:center;">No students found for this semester.</p>';
     }
 });
-
-// 2. On Subject Change -> Load Question Papers
-elSub.addEventListener('change', function() {
-    const subId = this.value;
-    
-    elQp.innerHTML = '<option value="">-- Select Question Paper --</option>';
-    elQp.disabled = true;
-    elBtn.disabled = true;
-
-    if (!subId) return;
-
-    if (qpsData[subId]) {
-        elQp.disabled = false;
-        qpsData[subId].forEach(q => {
-            elQp.add(new Option(q.title, q.id));
-        });
-    } else {
-        elQp.add(new Option("-- No tests created for this subject --", ""));
-    }
-});
-
-// 3. Enable Submit only if QP is selected
-elQp.addEventListener('change', function() {
-    if (this.value) {
-        elBtn.disabled = false;
-    } else {
-        elBtn.disabled = true;
-    }
-});
-
 </script>
-
 </body>
 </html>
