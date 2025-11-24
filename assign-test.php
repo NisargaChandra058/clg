@@ -1,14 +1,5 @@
 <?php
-session_start();
-require_once('db.php'); // Database connection ($pdo)
-
-// Optional: Admin check
-/*
-if (!isset($_SESSION['role']) || $_SESSION['role'] !== 'admin') {
-    header("Location: /login");
-    exit;
-}
-*/
+require_once('db.php'); // Database connection (PDO in $pdo)
 
 $message = '';
 
@@ -21,6 +12,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
         try {
             $pdo->beginTransaction();
 
+            // PostgreSQL insert with ON CONFLICT skip duplicates
             $stmt = $pdo->prepare("
                 INSERT INTO student_subject_allocation (student_id, subject_id)
                 VALUES (:student_id, :subject_id)
@@ -41,23 +33,21 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
             }
 
             $pdo->commit();
-            $message = "<div class='message success'>✅ Assigned subject to $assigned_count new student(s)!</div>";
+            $message = "<p class='message success'>✅ Assigned subject to $assigned_count new student(s)!</p>";
         } catch (PDOException $e) {
             $pdo->rollBack();
-            $message = "<div class='message error'>❌ Database error: " . htmlspecialchars($e->getMessage()) . "</div>";
+            $message = "<p class='message error'>❌ Database error: " . htmlspecialchars($e->getMessage()) . "</p>";
         }
     } else {
-        $message = "<div class='message error'>⚠️ Please select a semester, subject, and at least one student.</div>";
+        $message = "<p class='message error'>⚠️ Please select a semester, subject, and at least one student.</p>";
     }
 }
 
 // --- Fetch dropdown data ---
 try {
-    // 1. Semesters
     $semesters = $pdo->query("SELECT id, name FROM semesters ORDER BY name")->fetchAll(PDO::FETCH_ASSOC);
 
-    // 2. Subjects (Grouped by Semester)
-    // Note: We use COALESCE to handle cases where semester_id might be in different columns based on previous migrations
+    // Use COALESCE to handle subjects with either semester_id or semester value
     $subjects_stmt = $pdo->query("
         SELECT id, name, subject_code, COALESCE(semester_id, semester) AS semester_id
         FROM subjects
@@ -69,8 +59,7 @@ try {
         $subjects_by_semester[$subject['semester_id']][] = $subject;
     }
 
-    // 3. Students (Grouped by Semester)
-    // CRITICAL: This queries the 'students' table, NOT 'users'.
+    // Fetch students grouped by semester
     $students_stmt = $pdo->query("
         SELECT id, student_name, semester
         FROM students
@@ -86,7 +75,7 @@ try {
     die("Error fetching data: " . htmlspecialchars($e->getMessage()));
 }
 
-// Convert to JSON for JS
+// Convert PHP arrays to JSON for JavaScript
 $subjects_json = json_encode($subjects_by_semester);
 $students_json = json_encode($students_by_semester);
 ?>
@@ -106,7 +95,7 @@ $students_json = json_encode($students_by_semester);
             --fire-engine-red: #d90429;
         }
         body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-family: 'Segoe UI', sans-serif;
             margin: 0; padding: 20px;
             background: var(--space-cadet);
             color: var(--antiflash-white);
@@ -118,41 +107,41 @@ $students_json = json_encode($students_by_semester);
             background: rgba(141,153,174,0.1);
             border-radius: 15px;
             border: 1px solid rgba(141,153,174,0.2);
-            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
         }
-        h2 { text-align: center; margin-bottom: 20px; border-bottom: 2px solid var(--fire-engine-red); padding-bottom: 10px; display: inline-block; }
-        form { display: flex; flex-direction: column; gap: 15px; }
-        label { font-weight: bold; color: var(--cool-gray); }
-        
+        h2 { text-align: center; margin-bottom: 20px; }
+        form { display: flex; flex-direction: column; gap: 10px; }
+        label { font-weight: bold; }
         select, button {
-            padding: 12px;
-            border-radius: 6px;
+            padding: 10px;
+            border-radius: 5px;
             border: 1px solid var(--cool-gray);
-            background: rgba(43,45,66,0.8);
+            background: rgba(43,45,66,0.5);
             color: var(--antiflash-white);
-            font-size: 1rem;
         }
-        select:focus { outline: none; border-color: var(--red-pantone); }
-        select:disabled { background: rgba(43,45,66,0.3); color: #666; cursor: not-allowed; }
-        
+        select:disabled {
+            background: rgba(43,45,66,0.2);
+            color: var(--cool-gray);
+        }
         button {
             background-color: var(--fire-engine-red);
             border: none;
             cursor: pointer;
             font-weight: bold;
-            margin-top: 10px;
-            transition: background 0.3s;
+            font-size: 1em;
         }
         button:hover { background-color: var(--red-pantone); }
-        
-        .message { padding: 15px; border-radius: 6px; text-align: center; font-weight: bold; margin-bottom: 20px; }
-        .success { background: rgba(42, 157, 143, 0.2); color: #4ecdc4; border: 1px solid #2a9d8f; }
-        .error { background: rgba(239, 35, 60, 0.2); color: #ffadad; border: 1px solid #ef233c; }
-        
+        .message {
+            text-align: center;
+            padding: 10px;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+        .success { background: #d4edda; color: #155724; }
+        .error { background: #f8d7da; color: #721c24; }
         .students-list {
-            background: rgba(0,0,0,0.2);
-            border-radius: 8px;
-            padding: 15px;
+            background: rgba(255,255,255,0.05);
+            border-radius: 10px;
+            padding: 10px;
             max-height: 300px;
             overflow-y: auto;
             border: 1px solid var(--cool-gray);
@@ -160,24 +149,21 @@ $students_json = json_encode($students_by_semester);
         .student-item {
             display: flex;
             align-items: center;
-            padding: 8px;
-            border-bottom: 1px solid rgba(255,255,255,0.05);
-            transition: background 0.2s;
+            padding: 4px 0;
         }
-        .student-item:hover { background: rgba(255,255,255,0.05); }
-        .student-item label { cursor: pointer; color: var(--antiflash-white); font-weight: normal; width: 100%; margin-left: 10px; }
-        input[type="checkbox"] { transform: scale(1.2); cursor: pointer; }
+        .student-item label {
+            font-weight: normal;
+        }
     </style>
 </head>
 <body>
 
 <div class="container">
-    <center><h2>Assign Subject to Students</h2></center>
+    <h2>Assign Subject to Students</h2>
     <?php if (!empty($message)) echo $message; ?>
 
     <form method="POST" action="assign-subject-student.php">
-        <!-- Semester -->
-        <label for="semester_id">1. Select Semester:</label>
+        <label for="semester_id">Select Semester:</label>
         <select name="semester_id" id="semester_id" required>
             <option value="">-- Select Semester --</option>
             <?php foreach ($semesters as $sem): ?>
@@ -185,56 +171,42 @@ $students_json = json_encode($students_by_semester);
             <?php endforeach; ?>
         </select>
 
-        <!-- Subject -->
-        <label for="subject_id">2. Select Subject:</label>
+        <label for="subject_id">Select Subject:</label>
         <select name="subject_id" id="subject_id" required disabled>
             <option value="">-- First select a Semester --</option>
         </select>
 
-        <!-- Students List -->
         <div id="students_section" style="display:none;">
-            <label>3. Select Students:</label>
-            <div class="students-list" id="students_list">
-                <!-- Populated by JS -->
-            </div>
+            <label>Students (checked = assign):</label>
+            <div class="students-list" id="students_list"></div>
         </div>
 
-        <button type="submit" id="submit_btn" disabled>Assign Selected Students</button>
+        <button type="submit">Assign Selected Students</button>
     </form>
 </div>
 
 <script>
-// Load data from PHP
-const subjectsBySemester = <?= $subjects_json ?: '{}' ?>;
-const studentsBySemester = <?= $students_json ?: '{}' ?>;
-
-// Debugging: Check your console (F12) to see if data is loaded!
-console.log("Subjects Data:", subjectsBySemester);
-console.log("Students Data:", studentsBySemester);
+const subjectsBySemester = <?= $subjects_json ?>;
+const studentsBySemester = <?= $students_json ?>;
 
 const semesterSelect = document.getElementById('semester_id');
 const subjectSelect = document.getElementById('subject_id');
 const studentsSection = document.getElementById('students_section');
 const studentsList = document.getElementById('students_list');
-const submitBtn = document.getElementById('submit_btn');
 
 semesterSelect.addEventListener('change', function() {
     const semId = this.value;
-    console.log("Selected Semester ID:", semId);
 
-    // 1. Reset Subject Dropdown
+    // Reset subject dropdown
     subjectSelect.innerHTML = '<option value="">-- Select Subject --</option>';
     subjectSelect.disabled = true;
 
-    // 2. Reset Students List
+    // Reset students
     studentsList.innerHTML = '';
     studentsSection.style.display = 'none';
-    submitBtn.disabled = true;
 
-    if (!semId) return;
-
-    // --- POPULATE SUBJECTS ---
-    if (subjectsBySemester[semId]) {
+    // ✅ Populate Subjects (support COALESCE mapping)
+    if (semId && subjectsBySemester[semId]) {
         subjectSelect.disabled = false;
         subjectsBySemester[semId].forEach(sub => {
             const opt = document.createElement('option');
@@ -242,49 +214,32 @@ semesterSelect.addEventListener('change', function() {
             opt.textContent = `${sub.subject_code} - ${sub.name}`;
             subjectSelect.appendChild(opt);
         });
+
+        // Auto-select the first subject
+        if (subjectSelect.options.length > 1) {
+            subjectSelect.selectedIndex = 1;
+        }
     } else {
-        const opt = document.createElement('option');
-        opt.textContent = "-- No subjects found --";
-        subjectSelect.appendChild(opt);
+        console.warn("No subjects found for semester ID:", semId);
     }
 
-    // --- POPULATE STUDENTS ---
-    if (studentsBySemester[semId]) {
+    // ✅ Populate Students
+    if (semId && studentsBySemester[semId]) {
         studentsSection.style.display = 'block';
-        submitBtn.disabled = false;
-        
-        // Add "Select All" option
-        const selectAllDiv = document.createElement('div');
-        selectAllDiv.className = 'student-item';
-        selectAllDiv.style.borderBottom = "2px solid #666";
-        selectAllDiv.innerHTML = `
-            <input type="checkbox" id="select_all" checked>
-            <label for="select_all" style="font-weight:bold;">Select All Students</label>
-        `;
-        studentsList.appendChild(selectAllDiv);
-
-        // Add individual students
         studentsBySemester[semId].forEach(stu => {
             const div = document.createElement('div');
             div.className = 'student-item';
             div.innerHTML = `
-                <input type="checkbox" name="students[]" value="${stu.id}" class="stu-checkbox" checked id="stu_${stu.id}">
-                <label for="stu_${stu.id}">
+                <label>
+                    <input type="checkbox" name="students[]" value="${stu.id}" checked>
                     ${stu.student_name}
                 </label>
             `;
             studentsList.appendChild(div);
         });
-
-        // Select All Logic
-        document.getElementById('select_all').addEventListener('change', function() {
-            const checkboxes = document.querySelectorAll('.stu-checkbox');
-            checkboxes.forEach(cb => cb.checked = this.checked);
-        });
-
-    } else {
+    } else if (semId) {
         studentsSection.style.display = 'block';
-        studentsList.innerHTML = '<p style="padding:10px;text-align:center;color:#ffadad;">No students found for this semester in the <strong>students</strong> table.<br><small>Did you run the SQL migration?</small></p>';
+        studentsList.innerHTML = '<p style="padding:10px;text-align:center;">No students found for this semester.</p>';
     }
 });
 </script>
