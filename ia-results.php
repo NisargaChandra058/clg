@@ -1,10 +1,19 @@
 <?php
 session_start();
+// Enable error reporting for debugging
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
+
 require_once 'db.php'; // PDO Connection
 
 // 1. Authorization Check
-// If not logged in, redirect to login page immediately
-if (!isset($_SESSION['user_id']) || $_SESSION['role'] !== 'student') {
+// We use strtolower() to handle 'Student', 'student', or 'STUDENT' roles correctly.
+$role = strtolower($_SESSION['role'] ?? '');
+
+if (!isset($_SESSION['user_id']) || $role !== 'student') {
+    // Optional: Debugging line (Uncomment if still redirecting unexpectedly)
+    // die("Access Denied. User ID: " . ($_SESSION['user_id'] ?? 'Missing') . ", Role: " . $role);
+    
     header("Location: student-login.php");
     exit;
 }
