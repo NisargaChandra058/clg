@@ -1,75 +1,49 @@
 <?php
 session_start();
-error_reporting(E_ALL);
-ini_set('display_errors', 1);
-
 require_once 'db.php'; // PDO Connection
 
-echo "<div style='font-family:monospace; background:#333; color:#0f0; padding:20px; margin-bottom:20px;'>";
-echo "<strong>--- DIAGNOSTIC MODE ---</strong><br>";
-
-// 1. CHECK SESSION
-echo "Checking Session... ";
-if (!isset($_SESSION['user_id'])) {
-    echo "<span style='color:red'>FAIL: Session 'user_id' is missing. You are not logged in.</span><br>";
-    echo "<a href='student-login.php' style='color:white'>Go to Login</a></div>";
+// 1. Authorization Check
+// If not logged in, redirect to login page immediately
+if (!isset($_SESSION['user_id']) || $_SESSION['role'] !== 'student') {
+    header("Location: student-login.php");
     exit;
 }
-echo "<span style='color:#0f0'>OK (User ID: " . $_SESSION['user_id'] . ")</span><br>";
 
-// 2. CHECK ROLE
-echo "Checking Role... ";
-$role = strtolower($_SESSION['role'] ?? 'none');
-echo "Role is '$role'. ";
-if ($role !== 'student') {
-    echo "<span style='color:red'>FAIL: Role must be 'student'.</span><br></div>";
-    exit;
-}
-echo "<span style='color:#0f0'>OK</span><br>";
-
-// 3. CHECK DATABASE LINK
 $user_id = $_SESSION['user_id'];
-$student_id = null;
-
-try {
-    // Get Email from User ID
-    echo "Fetching User Email... ";
-    $stmt = $pdo->prepare("SELECT email FROM users WHERE id = :id");
-    $stmt->execute(['id' => $user_id]);
-    $user_email = $stmt->fetchColumn();
-    
-    if (!$user_email) {
-        echo "<span style='color:red'>FAIL: Could not find user with ID $user_id in 'users' table.</span><br></div>";
-        exit;
-    }
-    echo "<span style='color:#0f0'>OK ($user_email)</span><br>";
-
-    // Get Student ID from Email
-    echo "Looking up Student Profile... ";
-    $stmt = $pdo->prepare("SELECT id, student_name FROM students WHERE email = :email");
-    $stmt->execute(['email' => $user_email]);
-    $student = $stmt->fetch(PDO::FETCH_ASSOC);
-
-    if (!$student) {
-        echo "<span style='color:red'>FAIL: No record found in 'students' table for email '$user_email'.</span><br>";
-        echo "<strong style='color:yellow'>SOLUTION: Ask Admin to run 'Fix Missing Students' in Assign Subject page.</strong><br></div>";
-        exit;
-    }
-    $student_id = $student['id'];
-    echo "<span style='color:#0f0'>OK (Student ID: $student_id, Name: {$student['student_name']})</span><br>";
-
-} catch (PDOException $e) {
-    echo "<span style='color:red'>DATABASE ERROR: " . $e->getMessage() . "</span><br></div>";
-    exit;
-}
-
-echo "<strong>--- CHECKS PASSED. LOADING DATA ---</strong></div>";
-
-// ---------------------------------------------------------
-// 4. FETCH RESULTS (Normal Logic)
-// ---------------------------------------------------------
 $results = [];
+
 try {
+    // -------------------------------------------------------------------------
+    // 2. RESOLVE USER ID -> STUDENT ID (The "Bridge")
+    // -------------------------------------------------------------------------
+    
+    // Step A: Get User Email
+    $stmt_user = $pdo->prepare("SELECT email FROM users WHERE id = :id");
+    $stmt_user->execute(['id' => $user_id]);
+    $user_email = $stmt_user->fetchColumn();
+
+    $student_id = null;
+
+    if ($user_email) {
+        // Step B: Get Student ID from Email
+        $stmt_stu = $pdo->prepare("SELECT id FROM students WHERE email = :email");
+        $stmt_stu->execute(['email' => $user_email]);
+        $student_id = $stmt_stu->fetchColumn();
+    }
+
+    if (!$student_id) {
+        // If logged in as User but no Student profile exists
+        die("<div style='padding:20px; font-family:sans-serif; text-align:center; color:#721c24; background:#f8d7da;'>
+                <h2>❌ Student Profile Not Found</h2>
+                <p>Your login works, but we couldn't find your academic record.</p>
+                <p><strong>To Fix:</strong> Ask the Admin to use the 'Fix Missing Students' button in the Assign Subject page.</p>
+                <a href='student-dashboard.php' style='background:#333; color:white; padding:10px; text-decoration:none; border-radius:5px;'>Back to Dashboard</a>
+             </div>");
+    }
+
+    // -------------------------------------------------------------------------
+    // 3. FETCH RESULTS
+    // -------------------------------------------------------------------------
     $sql = "
         SELECT 
             COALESCE(s.name, 'General') AS subject_name,
@@ -83,14 +57,15 @@ try {
         WHERE ir.student_id = :sid
         ORDER BY ir.created_at DESC
     ";
+    
     $stmt = $pdo->prepare($sql);
     $stmt->execute(['sid' => $student_id]);
     $results = $stmt->fetchAll(PDO::FETCH_ASSOC);
-} catch (Exception $e) {
-    die("Query Error: " . $e->getMessage());
+
+} catch (PDOException $e) {
+    die("Database Error: " . htmlspecialchars($e->getMessage()));
 }
 ?>
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -99,40 +74,105 @@ try {
     <title>IA Results</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
     <style>
-        body { font-family: 'Inter', sans-serif; background: #f1f5f9; padding: 40px 20px; }
-        .container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 16px; }
+        body { 
+            font-family: 'Inter', sans-serif; 
+            background: #f1f5f9; 
+            margin: 0; 
+            padding: 40px 20px; 
+            color: #334155; 
+        }
+        .container { 
+            max-width: 800px; 
+            margin: 0 auto; 
+            background: white; 
+            padding: 30px; 
+            border-radius: 16px; 
+            box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); 
+        }
+        h2 { 
+            text-align: center; 
+            margin-bottom: 30px; 
+            color: #0f172a; 
+            border-bottom: 3px solid #3b82f6; 
+            padding-bottom: 10px;
+            display: inline-block;
+        }
+        .header-wrap { text-align: center; }
+        
         table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-        th { background: #007bff; color: white; padding: 15px; text-align: left; }
-        td { padding: 15px; border-bottom: 1px solid #eee; }
+        th { background: #f8fafc; color: #64748b; padding: 15px; text-align: left; font-weight: 600; border-bottom: 2px solid #e2e8f0; }
+        td { padding: 15px; border-bottom: 1px solid #e2e8f0; font-size: 0.95rem; }
+        tr:last-child td { border-bottom: none; }
+        
+        .score-badge {
+            background: #dcfce7;
+            color: #166534;
+            padding: 5px 10px;
+            border-radius: 20px;
+            font-weight: 700;
+            font-size: 0.9rem;
+        }
+        .date-text { color: #94a3b8; font-size: 0.85rem; }
+        
+        .back-link { 
+            display: inline-block; 
+            margin-top: 30px; 
+            text-decoration: none; 
+            color: #64748b; 
+            font-weight: 500; 
+            transition: color 0.2s; 
+        }
+        .back-link:hover { color: #3b82f6; }
+        
+        .no-records { 
+            text-align: center; 
+            padding: 40px; 
+            color: #94a3b8; 
+            font-style: italic; 
+            background: #f8fafc;
+            border-radius: 8px;
+            border: 1px dashed #cbd5e1;
+        }
     </style>
 </head>
 <body>
+
     <div class="container">
-        <h2 style="text-align:center">🏆 Internal Assessment Results</h2>
-        
+        <div class="header-wrap">
+            <h2>🏆 Internal Assessment Results</h2>
+        </div>
+
         <?php if (empty($results)): ?>
-            <div style="text-align:center; padding:40px; color:#888; font-style:italic; border:1px dashed #ccc;">
-                No results found for Student ID: <?= $student_id ?>
-            </div>
+            <div class="no-records">You haven't completed any tests yet.</div>
         <?php else: ?>
             <table>
-                <thead><tr><th>Subject</th><th>Test Name</th><th>Score</th><th>Date</th></tr></thead>
+                <thead>
+                    <tr>
+                        <th>Subject</th>
+                        <th>Test Name</th>
+                        <th>Score</th>
+                        <th>Date</th>
+                    </tr>
+                </thead>
                 <tbody>
                     <?php foreach ($results as $row): ?>
                         <tr>
-                            <td><?= htmlspecialchars($row['subject_name']) ?></td>
+                            <td style="font-weight:500; color:#0f172a;"><?= htmlspecialchars($row['subject_name']) ?></td>
                             <td><?= htmlspecialchars($row['test_name']) ?></td>
-                            <td><strong><?= htmlspecialchars($row['marks']) ?></strong> / <?= htmlspecialchars($row['max_marks']) ?></td>
+                            <td>
+                                <span class="score-badge"><?= htmlspecialchars($row['marks']) ?> / <?= htmlspecialchars($row['max_marks']) ?></span>
+                            </td>
                             <td><?= date('M d, Y', strtotime($row['created_at'])) ?></td>
                         </tr>
                     <?php endforeach; ?>
                 </tbody>
             </table>
         <?php endif; ?>
-        
-        <center style="margin-top:20px;">
-            <a href="student-dashboard.php" style="text-decoration:none; color:#555;">&laquo; Back to Dashboard</a>
-        </center>
+
+        <div style="text-align:center;">
+            <a href="student-dashboard.php" class="back-link">&laquo; Back to Dashboard</a>
+        </div>
     </div>
+
 </body>
 </html>
