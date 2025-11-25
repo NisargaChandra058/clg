@@ -1,99 +1,125 @@
 <?php
-session_start();
-require_once 'db.php'; // PDO Connection
+// student-dashboard.php
+error_reporting(E_ALL);
+ini_set('display_errors', 1); // Show errors for debugging
 
-// 1. Authorization Check
-if (!isset($_SESSION['user_id']) || $_SESSION['role'] !== 'student') {
-    // Debugging: If session is missing, show why before redirecting
-    // echo "Session missing or role not student. Role: " . ($_SESSION['role'] ?? 'None'); 
-    header("Location: student-login.php");
+session_start();
+require_once('db.php'); // PDO connection ($pdo)
+
+// -------------------------------------------------------------------------
+// 1. AUTHORIZATION FIX
+// -------------------------------------------------------------------------
+// We check for 'user_id' because that is what your Login page sets.
+if (!isset($_SESSION['user_id'])) {
+    header('Location: student-login.php');
     exit;
 }
 
-$student_id_from_session = $_SESSION['user_id'];
-$student = null;
-$attendance_stats = ['total' => 0, 'present' => 0, 'percentage' => 0];
-$notifications = [];
-$results = [];
+// We assume the logged-in user IS the student (Single Table Architecture)
+$student_id = (int) $_SESSION['user_id'];
+$student_name = $_SESSION['name'] ?? 'Student';
+
 $tests = [];
+$results = [];
+$attendance_summary = [];
+$page_error = '';
 
 try {
-    // 2. Fetch Student Details
-    // DIRECT LOOKUP: We assume the session ID is the Student ID (from student-login.php)
-    $stmt = $pdo->prepare("SELECT * FROM students WHERE id = :id");
-    $stmt->execute(['id' => $student_id_from_session]);
+    // -------------------------------------------------------------------------
+    // 2. FETCH STUDENT DETAILS
+    // -------------------------------------------------------------------------
+    $stmt = $pdo->prepare("SELECT student_name, email, semester, usn FROM students WHERE id = :id LIMIT 1");
+    $stmt->execute([':id' => $student_id]);
     $student = $stmt->fetch(PDO::FETCH_ASSOC);
 
-    // FALLBACK: If not found directly, maybe they logged in via Main Login (Users Table)?
-    // We try to match by Name if we have it, or Email if we had stored it.
-    if (!$student && isset($_SESSION['name'])) {
-        $stmt_fallback = $pdo->prepare("SELECT * FROM students WHERE student_name = :name LIMIT 1");
-        $stmt_fallback->execute(['name' => $_SESSION['name']]);
-        $student = $stmt_fallback->fetch(PDO::FETCH_ASSOC);
-    }
+    if ($student) {
+        $student_name = $student['student_name'];
+        $semester = $student['semester'] ?? 0;
 
-    if (!$student) {
-        // If still not found, it means the data is out of sync.
-        // We DO NOT redirect immediately so you can see the error.
-        die("<div style='padding:20px; background:#f8d7da; color:#721c24; font-family:sans-serif; text-align:center;'>
-                <h2>❌ Student Profile Not Found</h2>
-                <p>The system could not find a student with ID: <strong>$student_id_from_session</strong> in the <code>students</code> table.</p>
-                <p><strong>Possible Fix:</strong> You might be logged in as a 'User' but not added as a 'Student'.<br> 
-                Ask the Admin to go to 'Assign Subject' and click 'Fix Missing Students'.</p>
-                <a href='logout.php' style='background:#dc3545; color:white; padding:10px 20px; text-decoration:none; border-radius:5px;'>Logout & Try Again</a>
-             </div>");
-    }
+        // ---------------------------------------------------------------------
+        // 3. FETCH PENDING TESTS (From student_test_allocation)
+        // ---------------------------------------------------------------------
+        // We look for tests assigned to THIS student that they haven't taken yet
+        $test_stmt = $pdo->prepare("
+            SELECT qp.id, qp.title, COALESCE(s.name, 'General') as subject_name
+            FROM student_test_allocation sta
+            JOIN question_papers qp ON sta.qp_id = qp.id
+            LEFT JOIN subjects s ON qp.subject_id = s.id
+            WHERE sta.student_id = :sid
+            AND qp.id NOT IN (SELECT qp_id FROM ia_results WHERE student_id = :sid)
+            ORDER BY qp.id DESC
+        ");
+        $test_stmt->execute([':sid' => $student_id]);
+        $tests = $test_stmt->fetchAll(PDO::FETCH_ASSOC);
 
-    $final_student_id = $student['id']; // Use the real confirmed ID
+        // ---------------------------------------------------------------------
+        // 4. FETCH RECENT RESULTS
+        // ---------------------------------------------------------------------
+        $results_stmt = $pdo->prepare("
+            SELECT 
+                COALESCE(s.name, '—') AS subject_name,
+                qp.title AS test_name,
+                ir.marks,
+                ir.max_marks
+            FROM ia_results ir
+            JOIN question_papers qp ON ir.qp_id = qp.id
+            LEFT JOIN subjects s ON qp.subject_id = s.id
+            WHERE ir.student_id = :sid
+            ORDER BY ir.id DESC
+            LIMIT 50
+        ");
+        $results_stmt->execute([':sid' => $student_id]);
+        $results = $results_stmt->fetchAll(PDO::FETCH_ASSOC);
 
-    // 3. Fetch Notifications
-    $notif_stmt = $pdo->query("SELECT message, created_at FROM notifications ORDER BY created_at DESC LIMIT 5");
-    $notifications = $notif_stmt->fetchAll(PDO::FETCH_ASSOC);
+        // ---------------------------------------------------------------------
+        // 5. FETCH ATTENDANCE SUMMARY
+        // ---------------------------------------------------------------------
+        try {
+            $att_sql = "
+                SELECT 
+                    COALESCE(sub.name, 'General') AS subject_name,
+                    SUM(CASE WHEN a.status = 'present' THEN 1 ELSE 0 END) AS present_count,
+                    COUNT(*) AS total_count
+                FROM attendance a
+                LEFT JOIN subjects sub ON a.subject_id = sub.id
+                WHERE a.student_id = :sid
+                GROUP BY sub.name
+                ORDER BY sub.name
+            ";
+            $att_stmt = $pdo->prepare($att_sql);
+            $att_stmt->execute([':sid' => $student_id]);
+            $att_rows = $att_stmt->fetchAll(PDO::FETCH_ASSOC);
 
-    // 4. Fetch IA Results
-    $res_stmt = $pdo->prepare("
-        SELECT s.name as subject_name, qp.title as test_title, ir.marks, ir.max_marks
-        FROM ia_results ir
-        JOIN question_papers qp ON ir.qp_id = qp.id
-        LEFT JOIN subjects s ON qp.subject_id = s.id
-        WHERE ir.student_id = :sid
-        ORDER BY ir.created_at DESC
-    ");
-    $res_stmt->execute(['sid' => $final_student_id]);
-    $results = $res_stmt->fetchAll(PDO::FETCH_ASSOC);
+            foreach ($att_rows as $r) {
+                $present = (int)$r['present_count'];
+                $total = (int)$r['total_count'];
+                $percent = $total > 0 ? round(($present / $total) * 100, 2) : 0;
+                
+                $attendance_summary[] = [
+                    'subject' => $r['subject_name'],
+                    'present' => $present,
+                    'total'   => $total,
+                    'percent' => $percent
+                ];
+            }
+        } catch (PDOException $attEx) {
+            // Ignore attendance errors if table is empty
+        }
 
-    // 5. Fetch Assigned Tests
-    // Tests assigned via student_test_allocation but NOT yet in ia_results
-    $test_stmt = $pdo->prepare("
-        SELECT qp.id, qp.title, COALESCE(s.name, 'General') as subject_name
-        FROM student_test_allocation sta
-        JOIN question_papers qp ON sta.qp_id = qp.id
-        LEFT JOIN subjects s ON qp.subject_id = s.id
-        WHERE sta.student_id = :sid
-        AND qp.id NOT IN (SELECT qp_id FROM ia_results WHERE student_id = :sid)
-    ");
-    $test_stmt->execute(['sid' => $final_student_id]);
-    $tests = $test_stmt->fetchAll(PDO::FETCH_ASSOC);
-
-    // 6. Fetch Attendance Stats
-    $att_stmt = $pdo->prepare("
-        SELECT 
-            COUNT(*) as total,
-            SUM(CASE WHEN status = 'present' THEN 1 ELSE 0 END) as present
-        FROM attendance 
-        WHERE student_id = :sid
-    ");
-    $att_stmt->execute(['sid' => $final_student_id]);
-    $att_data = $att_stmt->fetch(PDO::FETCH_ASSOC);
-
-    if ($att_data && $att_data['total'] > 0) {
-        $attendance_stats['total'] = $att_data['total'];
-        $attendance_stats['present'] = $att_data['present'];
-        $attendance_stats['percentage'] = round(($att_data['present'] / $att_data['total']) * 100);
+    } else {
+        $page_error = "Student record not found. Please contact admin.";
     }
 
 } catch (PDOException $e) {
-    die("Dashboard Error: " . $e->getMessage());
+    $page_error = "Database Error: " . htmlspecialchars($e->getMessage());
+}
+
+// Prepare data for chart
+$chart_labels = [];
+$chart_data = [];
+foreach ($attendance_summary as $row) {
+    $chart_labels[] = $row['subject'];
+    $chart_data[] = $row['percent'];
 }
 ?>
 
@@ -101,154 +127,140 @@ try {
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Student Dashboard</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
-        :root { --bg: #f4f7f6; --sidebar: #2b2d42; --active: #3b82f6; --text: #333; --card: #fff; }
-        body { font-family: 'Segoe UI', sans-serif; margin: 0; background: var(--bg); display: flex; min-height: 100vh; }
-        
-        /* Sidebar */
-        .sidebar { width: 250px; background: var(--sidebar); color: white; display: flex; flex-direction: column; padding: 20px; position: fixed; height: 100%; }
-        .sidebar h2 { margin-bottom: 30px; text-align: center; color: #edf2f4; font-size: 1.5rem; }
-        .sidebar a { text-decoration: none; color: #8d99ae; padding: 12px; margin: 5px 0; border-radius: 5px; transition: 0.3s; font-weight: 500; display: block; }
-        .sidebar a:hover, .sidebar a.active { background: rgba(255,255,255,0.1); color: white; }
-        .logout { margin-top: auto; color: #ef233c !important; }
+        :root { --space-cadet: #2b2d42; --cool-gray: #8d99ae; --antiflash-white: #edf2f4; --red-pantone: #ef233c; --fire-engine-red: #d90429; }
+        body { font-family: 'Segoe UI', sans-serif; margin: 0; padding: 20px; background: var(--space-cadet); color: var(--antiflash-white); }
+        .navbar { display: flex; justify-content: space-between; align-items: center; max-width: 1200px; margin: 0 auto 20px auto; padding: 10px 20px; background: rgba(141, 153, 174, 0.08); border-radius: 10px; }
+        .navbar h1 { margin: 0; font-size: 1.3em; }
+        .logout-btn { display: inline-block; padding: 8px 12px; background-color: var(--fire-engine-red); color: white; text-decoration: none; border-radius: 5px; font-weight: bold; }
+        .layout { max-width: 1200px; margin: 0 auto; display: grid; grid-template-columns: 1fr 420px; gap: 20px; align-items: start; }
+        @media (max-width: 980px) { .layout { grid-template-columns: 1fr; } }
 
-        /* Main Content */
-        .main { flex: 1; padding: 30px; margin-left: 250px; }
-        
-        /* Header */
-        .header-card { background: linear-gradient(135deg, #3b82f6, #2563eb); color: white; padding: 30px; border-radius: 15px; box-shadow: 0 10px 20px rgba(37, 99, 235, 0.2); margin-bottom: 30px; }
-        .header-card h1 { margin: 0; font-size: 24px; }
-        .header-card p { opacity: 0.9; margin-top: 5px; }
-
-        /* Grid Layout */
-        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
-        
         /* Cards */
-        .card { background: var(--card); padding: 20px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
-        .card h3 { margin-top: 0; border-bottom: 1px solid #eee; padding-bottom: 10px; color: var(--sidebar); font-size: 1.1rem; }
+        .card { background: rgba(141,153,174,0.06); padding: 18px; border-radius: 10px; border: 1px solid rgba(141,153,174,0.12); margin-bottom: 20px; }
+        .tests { margin-bottom: 18px; }
         
-        /* Profile Details */
-        .profile-row { display: flex; justify-content: space-between; margin-bottom: 10px; border-bottom: 1px dashed #eee; padding-bottom: 5px; }
-        .profile-label { color: #777; font-size: 0.9em; }
-        .profile-val { font-weight: 600; color: #333; }
+        /* Lists */
+        .test-list { list-style: none; padding: 0; margin: 0 0 12px 0; }
+        .test-list li { background: rgba(43,45,66,0.5); border: 1px solid var(--cool-gray); border-radius: 8px; margin-bottom: 10px; }
+        .test-list a { display: block; padding: 14px 18px; text-decoration: none; color: var(--antiflash-white); font-weight: bold; }
+        .test-list a:hover { background: rgba(141,153,174,0.12); }
 
-        /* Notifications */
-        .notif-item { background: #fffbe6; border-left: 4px solid #ffc107; padding: 10px; margin-bottom: 10px; border-radius: 4px; font-size: 0.95rem; }
-        .notif-date { font-size: 0.8em; color: #888; display: block; margin-top: 4px; }
-
-        /* Attendance Circle */
-        .att-circle { width: 100px; height: 100px; border-radius: 50%; background: conic-gradient(#22c55e <?= $attendance_stats['percentage'] ?>%, #eee 0); margin: 20px auto; display: flex; align-items: center; justify-content: center; position: relative; }
-        .att-circle::before { content: '<?= $attendance_stats['percentage'] ?>%'; position: absolute; background: white; width: 80px; height: 80px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 1.4em; color: #333; }
-
-        /* Tables */
-        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-        th, td { padding: 10px; text-align: left; border-bottom: 1px solid #eee; font-size: 0.9rem; }
-        th { color: #555; font-weight: 600; }
-        
-        .btn-take { background: #3b82f6; color: white; padding: 5px 10px; text-decoration: none; border-radius: 4px; font-size: 0.85rem; }
-        .btn-take:hover { background: #2563eb; }
-
-        /* Responsive */
-        @media (max-width: 768px) {
-            .sidebar { width: 100%; height: auto; position: relative; flex-direction: row; overflow-x: auto; }
-            .main { margin-left: 0; }
-            .grid { grid-template-columns: 1fr; }
-        }
+        /* Table */
+        .results-table { width: 100%; border-collapse: collapse; margin-top: 10px; background: #fff; color: var(--space-cadet); border-radius: 8px; overflow: hidden; }
+        .results-table th, .results-table td { padding: 12px 14px; border-bottom: 1px solid #eee; text-align: left; }
+        .results-table th { background: var(--space-cadet); color: var(--antiflash-white); }
+        .no-data { color: var(--cool-gray); padding: 12px; background: rgba(255,255,255,0.04); border-radius: 6px; font-style: italic; }
+        .message.error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; padding: 10px; border-radius: 5px; }
     </style>
 </head>
 <body>
 
-    <div class="sidebar">
-        <h2>Student Portal</h2>
-        <a href="#" class="active">Dashboard</a>
-        <a href="#">My Subjects</a>
-        <a href="#">Timetable</a>
-        <a href="logout.php" class="logout">Logout</a>
+    <div class="navbar">
+        <h1>Welcome, <?= htmlspecialchars($student_name) ?>!</h1>
+        <a href="logout.php" class="logout-btn">Logout</a>
     </div>
 
-    <div class="main">
-        <div class="header-card">
-            <h1>Welcome back, <?= htmlspecialchars($student['student_name']) ?>!</h1>
-            <p>Semester <?= htmlspecialchars($student['semester']) ?> | <?= htmlspecialchars($student['usn']) ?></p>
+    <?php if (!empty($page_error)): ?>
+        <div style="max-width:1200px;margin:0 auto;padding:0 20px 20px;">
+            <div class="card message error"><?= htmlspecialchars($page_error) ?></div>
         </div>
+    <?php endif; ?>
 
-        <div class="grid">
-            
-            <!-- 1. Profile Card -->
-            <div class="card">
-                <h3>My Profile</h3>
-                <div class="profile-row"><span class="profile-label">USN</span> <span class="profile-val"><?= htmlspecialchars($student['usn']) ?></span></div>
-                <div class="profile-row"><span class="profile-label">Email</span> <span class="profile-val"><?= htmlspecialchars($student['email']) ?></span></div>
-                <div class="profile-row"><span class="profile-label">DOB</span> <span class="profile-val"><?= htmlspecialchars($student['dob']) ?></span></div>
-                <div class="profile-row"><span class="profile-label">Semester</span> <span class="profile-val"><?= htmlspecialchars($student['semester']) ?></span></div>
-            </div>
-
-            <!-- 2. Attendance Card -->
-            <div class="card">
-                <h3>Attendance Overview</h3>
-                <div class="att-circle"></div>
-                <p style="text-align:center; color:#666; font-weight:500;">
-                    <?= $attendance_stats['present'] ?> / <?= $attendance_stats['total'] ?> Classes Attended
-                </p>
-            </div>
-
-            <!-- 3. Pending Tests -->
-            <div class="card">
-                <h3>📝 Pending Tests</h3>
+    <div class="layout">
+        <!-- LEFT COLUMN -->
+        <div>
+            <div class="card tests">
+                <h2 style="margin-top:0;">Available Tests</h2>
                 <?php if (empty($tests)): ?>
-                    <p style="color:#999; font-style:italic; padding:10px;">No pending tests.</p>
+                    <div class="no-data">You have no new tests assigned at this time.</div>
                 <?php else: ?>
-                    <table>
-                        <tr><th>Subject</th><th>Test</th><th>Action</th></tr>
-                        <?php foreach ($tests as $t): ?>
-                        <tr>
-                            <td><?= htmlspecialchars($t['subject_name']) ?></td>
-                            <td><?= htmlspecialchars($t['title']) ?></td>
-                            <td><a href="take-test.php?id=<?= $t['id'] ?>" class="btn-take">Start</a></td>
-                        </tr>
+                    <ul class="test-list">
+                        <?php foreach ($tests as $test): ?>
+                            <li><a href="take-test.php?id=<?= htmlspecialchars($test['id']) ?>">📝 Take Test: <?= htmlspecialchars($test['title']) ?></a></li>
                         <?php endforeach; ?>
-                    </table>
+                    </ul>
                 <?php endif; ?>
             </div>
 
-            <!-- 4. Recent Results -->
             <div class="card">
-                <h3>🏆 Recent Results</h3>
+                <h2 style="margin-top:0;">My Recent Results</h2>
                 <?php if (empty($results)): ?>
-                    <p style="color:#999; font-style:italic; padding:10px;">No results yet.</p>
+                    <div class="no-data">You have not completed any tests yet.</div>
                 <?php else: ?>
-                    <table>
-                        <tr><th>Subject</th><th>Marks</th><th>Max</th></tr>
-                        <?php foreach ($results as $r): ?>
-                        <tr>
-                            <td><?= htmlspecialchars($r['subject_name']) ?></td>
-                            <td style="font-weight:bold; color:#333;"><?= htmlspecialchars($r['marks']) ?></td>
-                            <td style="color:#777;"><?= htmlspecialchars($r['max_marks']) ?></td>
-                        </tr>
-                        <?php endforeach; ?>
+                    <table class="results-table">
+                        <thead>
+                            <tr><th>Subject</th><th>Test Name</th><th>Marks</th></tr>
+                        </thead>
+                        <tbody>
+                            <?php foreach ($results as $result): ?>
+                                <tr>
+                                    <td><?= htmlspecialchars($result['subject_name']) ?></td>
+                                    <td><?= htmlspecialchars($result['test_name']) ?></td>
+                                    <td><?= htmlspecialchars($result['marks']) ?> / <?= htmlspecialchars($result['max_marks']) ?></td>
+                                </tr>
+                            <?php endforeach; ?>
+                        </tbody>
                     </table>
                 <?php endif; ?>
             </div>
+        </div>
 
-            <!-- 5. Notifications -->
-            <div class="card" style="grid-column: 1 / -1;">
-                <h3>📢 Announcements</h3>
-                <?php if (empty($notifications)): ?>
-                    <p style="color:#999; font-style:italic;">No new notifications.</p>
+        <!-- RIGHT COLUMN -->
+        <aside>
+            <div class="card">
+                <h2 style="margin:0 0 10px 0;">Attendance</h2>
+                <?php if (empty($attendance_summary)): ?>
+                    <div class="no-data">No attendance data available.</div>
                 <?php else: ?>
-                    <?php foreach ($notifications as $notif): ?>
-                        <div class="notif-item">
-                            <?= htmlspecialchars($notif['message']) ?>
-                            <span class="notif-date"><?= date('M d, Y h:i A', strtotime($notif['created_at'])) ?></span>
-                        </div>
-                    <?php endforeach; ?>
+                    <canvas id="attendanceChart" width="400" height="300"></canvas>
+                    <div style="margin-top:12px;">
+                        <table class="results-table">
+                            <thead><tr><th>Subject</th><th>%</th></tr></thead>
+                            <tbody>
+                                <?php foreach ($attendance_summary as $row): ?>
+                                    <tr>
+                                        <td><?= htmlspecialchars($row['subject']) ?></td>
+                                        <td><?= htmlspecialchars($row['percent']) ?>%</td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
                 <?php endif; ?>
             </div>
-
-        </div>
+        </aside>
     </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script>
+    (function() {
+        const labels = <?= json_encode($chart_labels) ?>;
+        const data = <?= json_encode($chart_data) ?>;
+
+        if (labels && labels.length) {
+            const ctx = document.getElementById('attendanceChart').getContext('2d');
+            new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'Attendance (%)',
+                        data: data,
+                        backgroundColor: '#ef233c',
+                        borderWidth: 0
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    scales: { y: { beginAtZero: true, max: 100 } }
+                }
+            });
+        }
+    })();
+    </script>
 
 </body>
 </html>
