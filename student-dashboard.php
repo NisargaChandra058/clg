@@ -3,13 +3,14 @@ session_start();
 require_once 'db.php'; // PDO Connection
 
 // 1. Authorization Check
-// We use 'user_id' because that is what login.php sets
 if (!isset($_SESSION['user_id']) || $_SESSION['role'] !== 'student') {
-    header("Location: login.php");
+    // Debugging: If session is missing, show why before redirecting
+    // echo "Session missing or role not student. Role: " . ($_SESSION['role'] ?? 'None'); 
+    header("Location: student-login.php");
     exit;
 }
 
-$user_id = $_SESSION['user_id']; // This is the ID from the 'users' table
+$student_id_from_session = $_SESSION['user_id'];
 $student = null;
 $attendance_stats = ['total' => 0, 'present' => 0, 'percentage' => 0];
 $notifications = [];
@@ -18,25 +19,32 @@ $tests = [];
 
 try {
     // 2. Fetch Student Details
-    // We need to find the student record linked to this user email
-    // First, get email from users table
-    $stmt_user = $pdo->prepare("SELECT email FROM users WHERE id = :id");
-    $stmt_user->execute(['id' => $user_id]);
-    $user_email = $stmt_user->fetchColumn();
+    // DIRECT LOOKUP: We assume the session ID is the Student ID (from student-login.php)
+    $stmt = $pdo->prepare("SELECT * FROM students WHERE id = :id");
+    $stmt->execute(['id' => $student_id_from_session]);
+    $student = $stmt->fetch(PDO::FETCH_ASSOC);
 
-    if ($user_email) {
-        // Now get student details using email
-        $stmt = $pdo->prepare("SELECT * FROM students WHERE email = :email");
-        $stmt->execute(['email' => $user_email]);
-        $student = $stmt->fetch(PDO::FETCH_ASSOC);
+    // FALLBACK: If not found directly, maybe they logged in via Main Login (Users Table)?
+    // We try to match by Name if we have it, or Email if we had stored it.
+    if (!$student && isset($_SESSION['name'])) {
+        $stmt_fallback = $pdo->prepare("SELECT * FROM students WHERE student_name = :name LIMIT 1");
+        $stmt_fallback->execute(['name' => $_SESSION['name']]);
+        $student = $stmt_fallback->fetch(PDO::FETCH_ASSOC);
     }
 
     if (!$student) {
-        // If student record missing in 'students' table
-        die("Error: Student profile not found. Please contact Admin to sync your account.");
+        // If still not found, it means the data is out of sync.
+        // We DO NOT redirect immediately so you can see the error.
+        die("<div style='padding:20px; background:#f8d7da; color:#721c24; font-family:sans-serif; text-align:center;'>
+                <h2>❌ Student Profile Not Found</h2>
+                <p>The system could not find a student with ID: <strong>$student_id_from_session</strong> in the <code>students</code> table.</p>
+                <p><strong>Possible Fix:</strong> You might be logged in as a 'User' but not added as a 'Student'.<br> 
+                Ask the Admin to go to 'Assign Subject' and click 'Fix Missing Students'.</p>
+                <a href='logout.php' style='background:#dc3545; color:white; padding:10px 20px; text-decoration:none; border-radius:5px;'>Logout & Try Again</a>
+             </div>");
     }
 
-    $student_id_academic = $student['id']; // This is the ID in 'students' table
+    $final_student_id = $student['id']; // Use the real confirmed ID
 
     // 3. Fetch Notifications
     $notif_stmt = $pdo->query("SELECT message, created_at FROM notifications ORDER BY created_at DESC LIMIT 5");
@@ -51,12 +59,11 @@ try {
         WHERE ir.student_id = :sid
         ORDER BY ir.created_at DESC
     ");
-    $res_stmt->execute(['sid' => $student_id_academic]);
+    $res_stmt->execute(['sid' => $final_student_id]);
     $results = $res_stmt->fetchAll(PDO::FETCH_ASSOC);
 
-    // 5. Fetch Assigned Tests (THE FIX)
-    // We look in 'student_test_allocation', NOT 'test_allocation'
-    // We also filter out tests that are already in 'ia_results' (completed)
+    // 5. Fetch Assigned Tests
+    // Tests assigned via student_test_allocation but NOT yet in ia_results
     $test_stmt = $pdo->prepare("
         SELECT qp.id, qp.title, COALESCE(s.name, 'General') as subject_name
         FROM student_test_allocation sta
@@ -65,7 +72,7 @@ try {
         WHERE sta.student_id = :sid
         AND qp.id NOT IN (SELECT qp_id FROM ia_results WHERE student_id = :sid)
     ");
-    $test_stmt->execute(['sid' => $student_id_academic]);
+    $test_stmt->execute(['sid' => $final_student_id]);
     $tests = $test_stmt->fetchAll(PDO::FETCH_ASSOC);
 
     // 6. Fetch Attendance Stats
@@ -76,7 +83,7 @@ try {
         FROM attendance 
         WHERE student_id = :sid
     ");
-    $att_stmt->execute(['sid' => $student_id_academic]);
+    $att_stmt->execute(['sid' => $final_student_id]);
     $att_data = $att_stmt->fetch(PDO::FETCH_ASSOC);
 
     if ($att_data && $att_data['total'] > 0) {
