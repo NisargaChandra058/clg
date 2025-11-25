@@ -1,29 +1,55 @@
 <?php
 session_start();
-// 1. Correct the include path - assuming ia-results.php is in the root
-include('db-config.php'); 
+require_once 'db.php'; // Connect using PDO ($pdo)
 
-// Check if a student is logged in
-if (!isset($_SESSION['student_id'])) {
-    // Redirect to the correct student login page (adjust path if needed)
-    header("Location: student/student-login.php"); 
+// 1. Authorization Check
+if (!isset($_SESSION['user_id']) || $_SESSION['role'] !== 'student') {
+    header("Location: student-login.php"); 
     exit;
 }
 
-$student_id = $_SESSION['student_id'];
-$results = []; // Initialize an empty array for results
+$user_id = $_SESSION['user_id'];
+$results = [];
 
 try {
-    // Prepare and execute the query using PDO
-    $stmt = $conn->prepare("SELECT subject, marks FROM ia_results WHERE student_id = ? ORDER BY subject ASC");
-    $stmt->execute([$student_id]);
+    // 2. Resolve User ID -> Student ID
+    // (Same logic as dashboard to ensure we get the correct academic record)
+    $stmt_user = $pdo->prepare("SELECT email FROM users WHERE id = :id");
+    $stmt_user->execute(['id' => $user_id]);
+    $user_email = $stmt_user->fetchColumn();
+
+    if ($user_email) {
+        $stmt_stu = $pdo->prepare("SELECT id FROM students WHERE email = :email");
+        $stmt_stu->execute(['email' => $user_email]);
+        $student_id = $stmt_stu->fetchColumn();
+    }
+
+    if (empty($student_id)) {
+        die("<div style='padding:20px;color:red;'>Error: Student profile not found. Please contact admin.</div>");
+    }
+
+    // 3. Fetch Results (The Correct JOIN Query)
+    // We join ia_results -> question_papers -> subjects to get the names
+    $sql = "
+        SELECT 
+            COALESCE(s.name, 'General') AS subject_name,
+            qp.title AS test_name,
+            ir.marks,
+            ir.max_marks,
+            ir.created_at
+        FROM ia_results ir
+        JOIN question_papers qp ON ir.qp_id = qp.id
+        LEFT JOIN subjects s ON qp.subject_id = s.id
+        WHERE ir.student_id = :sid
+        ORDER BY ir.created_at DESC
+    ";
     
-    // Fetch all results
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute(['sid' => $student_id]);
     $results = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
 } catch (PDOException $e) {
-    // Handle database errors
-    die("Error: Could not retrieve IA results at this time. Please try again later. " . $e->getMessage());
+    die("Database Error: " . htmlspecialchars($e->getMessage()));
 }
 ?>
 <!DOCTYPE html>
@@ -33,91 +59,98 @@ try {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>IA Results</title>
     <style>
-        /* Consistent Styling from student dashboard */
         body { 
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; 
-            text-align: center; 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
             background: #f4f7f6; 
-            margin: 0;
-            padding: 20px;
+            margin: 0; 
+            padding: 40px 20px; 
+            color: #333;
         }
         .container { 
             max-width: 800px; 
-            margin: 40px auto; 
+            margin: 0 auto; 
             background: white; 
-            padding: 25px; 
-            border-radius: 8px; 
-            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1); 
+            padding: 30px; 
+            border-radius: 12px; 
+            box-shadow: 0 10px 25px rgba(0,0,0,0.05); 
         }
         h2 { 
-            color: #333; 
-            margin-bottom: 25px;
-        }
-        table { 
-            width: 100%; 
-            border-collapse: collapse; 
-            margin-top: 20px; 
-        }
-        th, td { 
-            border: 1px solid #ddd; 
-            padding: 12px; 
             text-align: center; 
+            margin-bottom: 30px; 
+            color: #2b2d42; 
+            border-bottom: 2px solid #007bff; 
+            padding-bottom: 10px;
+            display: inline-block;
         }
-        th { 
-            background: #007bff; 
-            color: white; 
-            font-weight: bold;
-        }
-        tr:nth-child(even) {
-            background-color: #f9f9f9;
-        }
+        .center-header { text-align: center; }
+        
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        th { background: #007bff; color: white; padding: 12px; text-align: left; font-weight: 600; }
+        td { padding: 12px; border-bottom: 1px solid #eee; color: #555; }
+        tr:last-child td { border-bottom: none; }
+        tr:hover { background-color: #f9f9f9; }
+
+        .marks { font-weight: bold; color: #2b2d42; }
+        .max-marks { color: #888; font-size: 0.9em; }
+        
         .back-link { 
-            text-decoration: none; 
-            color: white; 
-            background: #6c757d; 
-            padding: 10px 20px; 
             display: inline-block; 
-            border-radius: 5px; 
-            margin-top: 25px; 
-            transition: background-color 0.3s;
+            margin-top: 30px; 
+            text-decoration: none; 
+            color: #6c757d; 
+            font-weight: 500; 
+            transition: color 0.2s;
         }
-        .back-link:hover { 
-            background: #5a6268; 
-        }
-        .no-records {
-            color: #777;
-            font-style: italic;
-            padding: 20px;
+        .back-link:hover { color: #007bff; }
+        
+        .no-records { 
+            text-align: center; 
+            padding: 40px; 
+            color: #888; 
+            font-style: italic; 
+            background: #fdfdfd;
+            border-radius: 8px;
+            border: 1px dashed #ddd;
         }
     </style>
 </head>
 <body>
+
     <div class="container">
-        <h2>Internal Assessment (IA) Results</h2>
-        <table>
-            <thead>
-                <tr>
-                    <th>Subject</th>
-                    <th>Marks Obtained</th>
-                </tr>
-            </thead>
-            <tbody>
-                <?php if (empty($results)): ?>
+        <div class="center-header">
+            <h2>Internal Assessment (IA) Results</h2>
+        </div>
+
+        <?php if (empty($results)): ?>
+            <div class="no-records">No results found. You haven't completed any tests yet.</div>
+        <?php else: ?>
+            <table>
+                <thead>
                     <tr>
-                        <td colspan="2" class="no-records">No IA results have been uploaded for you yet.</td>
+                        <th>Subject</th>
+                        <th>Test Name</th>
+                        <th>Score</th>
+                        <th>Date</th>
                     </tr>
-                <?php else: ?>
+                </thead>
+                <tbody>
                     <?php foreach ($results as $row): ?>
                         <tr>
-                            <td><?= htmlspecialchars($row['subject']) ?></td>
-                            <td><?= htmlspecialchars($row['marks']) ?></td>
+                            <td><?= htmlspecialchars($row['subject_name']) ?></td>
+                            <td><?= htmlspecialchars($row['test_name']) ?></td>
+                            <td>
+                                <span class="marks"><?= htmlspecialchars($row['marks']) ?></span>
+                                <span class="max-marks"> / <?= htmlspecialchars($row['max_marks']) ?></span>
+                            </td>
+                            <td><?= date('M d, Y', strtotime($row['created_at'])) ?></td>
                         </tr>
                     <?php endforeach; ?>
-                <?php endif; ?>
-            </tbody>
-        </table>
-        <!-- Adjust path if student dashboard is elsewhere -->
-        <a href="student/student-dashboard.php" class="back-link">Back to Dashboard</a> 
+                </tbody>
+            </table>
+        <?php endif; ?>
+
+        <center><a href="student-dashboard.php" class="back-link">&laquo; Back to Dashboard</a></center>
     </div>
+
 </body>
 </html>
