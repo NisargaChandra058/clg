@@ -10,8 +10,14 @@ require_once 'db.php'; // PDO Connection
 // 1. AUTHORIZATION & STUDENT LOOKUP (The Bridge)
 // -------------------------------------------------------------------------
 if (!isset($_SESSION['user_id'])) {
-    // FIX: Redirect to the universal login page
-    header("Location: login.php");
+    // FIX: Instead of silently redirecting, show a clear message
+    echo "<div style='display:flex; justify-content:center; align-items:center; height:100vh; background:#f8fafc; font-family:sans-serif;'>
+            <div style='text-align:center; padding:40px; background:white; border-radius:10px; box-shadow:0 4px 6px rgba(0,0,0,0.1);'>
+                <h2 style='color:#dc2626; margin-top:0;'>⚠️ Access Denied</h2>
+                <p style='color:#475569; margin-bottom:20px;'>No active session found. You are not logged in.</p>
+                <a href='login.php' style='background:#2563eb; color:white; padding:10px 20px; text-decoration:none; border-radius:5px; font-weight:bold;'>Go to Login</a>
+            </div>
+          </div>";
     exit;
 }
 
