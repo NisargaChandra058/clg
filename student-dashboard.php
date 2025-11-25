@@ -10,7 +10,8 @@ require_once 'db.php'; // PDO Connection
 // 1. AUTHORIZATION & STUDENT LOOKUP (The Bridge)
 // -------------------------------------------------------------------------
 if (!isset($_SESSION['user_id'])) {
-    header("Location: student-login.php");
+    // FIX: Redirect to the universal login page
+    header("Location: login.php");
     exit;
 }
 
@@ -50,6 +51,29 @@ try {
     $student_id = $student['id']; // The real academic ID
 
     // -------------------------------------------------------------------------
+    // 1.5 SELF-HEALING: Ensure Tables/Columns Exist (Prevents Crashes)
+    // -------------------------------------------------------------------------
+    
+    // Ensure 'student_test_allocation' table exists
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS student_test_allocation (
+            id SERIAL PRIMARY KEY,
+            student_id INT NOT NULL,
+            qp_id INT NOT NULL,
+            assigned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(student_id, qp_id)
+        );
+    ");
+
+    // Ensure 'ia_results' has required columns (Fail-safe)
+    // This prevents 'Undefined column' errors if migration wasn't run
+    try {
+        $pdo->exec("ALTER TABLE ia_results ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP");
+        $pdo->exec("ALTER TABLE ia_results ADD COLUMN IF NOT EXISTS max_marks INT DEFAULT 100");
+    } catch (Exception $ex) { /* Ignore if exists */ }
+
+
+    // -------------------------------------------------------------------------
     // 2. FETCH DATA
     // -------------------------------------------------------------------------
 
@@ -83,20 +107,25 @@ try {
     $tests = $test_stmt->fetchAll(PDO::FETCH_ASSOC);
 
     // C. FETCH ATTENDANCE (For the Button)
-    $att_stmt = $pdo->prepare("
-        SELECT 
-            COUNT(*) as total,
-            SUM(CASE WHEN status = 'present' THEN 1 ELSE 0 END) as present
-        FROM attendance 
-        WHERE student_id = :sid
-    ");
-    $att_stmt->execute(['sid' => $student_id]);
-    $att_data = $att_stmt->fetch(PDO::FETCH_ASSOC);
+    // Wrapped in try-catch so dashboard loads even if attendance table is missing
+    try {
+        $att_stmt = $pdo->prepare("
+            SELECT 
+                COUNT(*) as total,
+                SUM(CASE WHEN status = 'present' THEN 1 ELSE 0 END) as present
+            FROM attendance 
+            WHERE student_id = :sid
+        ");
+        $att_stmt->execute(['sid' => $student_id]);
+        $att_data = $att_stmt->fetch(PDO::FETCH_ASSOC);
 
-    if ($att_data && $att_data['total'] > 0) {
-        $attendance_stats['total'] = $att_data['total'];
-        $attendance_stats['present'] = $att_data['present'];
-        $attendance_stats['percentage'] = round(($att_data['present'] / $att_data['total']) * 100);
+        if ($att_data && $att_data['total'] > 0) {
+            $attendance_stats['total'] = $att_data['total'];
+            $attendance_stats['present'] = $att_data['present'];
+            $attendance_stats['percentage'] = round(($att_data['present'] / $att_data['total']) * 100);
+        }
+    } catch (PDOException $e) {
+        // Ignore attendance errors silently
     }
 
 } catch (PDOException $e) {
