@@ -1,22 +1,43 @@
 <?php
-// student-dashboard.php (auto-detecting test_allocation / question_papers columns)
-// Drop-in replacement: make sure db.php sets $pdo (PDO instance)
+// student-dashboard.php (diagnostic mode)
+// Use DEBUG=true only temporarily on a dev/staging server or for short time on production
+// to help identify the cause of "Could not retrieve data..." errors.
 
 error_reporting(E_ALL);
-ini_set('display_errors', 0);
+ini_set('display_errors', 0); // still keep raw PHP errors off by default
 session_start();
 
-require_once('db.php');
+require_once('db.php'); // must define $pdo
+
+// === DEBUG FLAG ===
+// Set to true to show diagnostic info (SQL, detected columns, exception messages).
+// IMPORTANT: Turn this off after debugging to avoid leaking DB/schema/errors to users.
+$DEBUG = false;
+
+// Allow turning on debug by query param if on localhost (optional convenience)
+if (isset($_GET['debug']) && php_sapi_name() !== 'cli') {
+    // only allow enabling debug via ?debug=1 if client IP is localhost
+    $clientIp = $_SERVER['REMOTE_ADDR'] ?? '';
+    if (in_array($clientIp, ['127.0.0.1','::1'])) {
+        $DEBUG = true;
+    }
+}
 
 if (!isset($pdo) || !($pdo instanceof PDO)) {
-    http_response_code(500);
-    echo "Server configuration error. Please contact the administrator.";
+    if ($DEBUG) {
+        echo "<pre style='color:red'>Fatal: \$pdo is missing or not a PDO instance. Check db.php</pre>";
+    } else {
+        http_response_code(500);
+        echo "Server configuration error. Please contact the administrator.";
+    }
     error_log("[student-dashboard] Missing or invalid \$pdo in db.php");
     exit;
 }
+
 $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 $pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
 
+// redirect if not logged in
 if (!isset($_SESSION['student_id'])) {
     header('Location: student-login.php');
     exit;
@@ -28,10 +49,12 @@ $results = [];
 $attendance_summary = [];
 $student_name = 'Student';
 $page_error = '';
+$diagnostics = [
+    'detected' => [],
+    'strategies' => [],
+    'errors' => []
+];
 
-/**
- * Utility: get column names for a table in the current database
- */
 function get_table_columns(PDO $pdo, string $table) : array {
     $sql = "
         SELECT COLUMN_NAME
@@ -44,9 +67,6 @@ function get_table_columns(PDO $pdo, string $table) : array {
     return $rows ?: [];
 }
 
-/**
- * Utility: pick first existing column name from candidates array
- */
 function pick_col(array $cols, array $candidates) {
     foreach ($candidates as $cand) {
         if (in_array($cand, $cols, true)) return $cand;
@@ -62,13 +82,24 @@ try {
 
     if (!$student) {
         $page_error = "Student record not found.";
+        $diagnostics['errors'][] = "No student record for id={$student_id}";
     } else {
         $student_name = $student['student_name'] ?? $student_name;
         $class_id = $student['class_id'] ?? null;
 
         // 2) Auto-detect columns for test allocation lookup
-        $ta_cols = get_table_columns($pdo, 'test_allocation');
-        $qp_cols = get_table_columns($pdo, 'question_papers');
+        try {
+            $ta_cols = get_table_columns($pdo, 'test_allocation');
+            $qp_cols = get_table_columns($pdo, 'question_papers');
+        } catch (PDOException $ex) {
+            // Could be that INFORMATION_SCHEMA is restricted; capture error
+            $ta_cols = [];
+            $qp_cols = [];
+            $diagnostics['errors'][] = "INFORMATION_SCHEMA query error: " . $ex->getMessage();
+        }
+
+        $diagnostics['detected']['test_allocation_columns'] = $ta_cols;
+        $diagnostics['detected']['question_papers_columns'] = $qp_cols;
 
         // candidate names (common variations)
         $qp_id_candidates = ['qp_id', 'question_paper_id', 'qpId', 'qpid', 'paper_id', 'questionpaper_id'];
@@ -77,7 +108,6 @@ try {
         $qp_class_candidates = ['class_id', 'assigned_class', 'assigned_to_class', 'class', 'classid'];
         $qp_publish_candidates = ['is_published', 'published', 'visible', 'is_visible'];
 
-        // pick detected column names (if table exists)
         $ta_has_cols = !empty($ta_cols);
         $qp_has_cols = !empty($qp_cols);
 
@@ -88,10 +118,18 @@ try {
         $qp_class_col = $qp_has_cols ? pick_col($qp_cols, $qp_class_candidates) : null;
         $qp_publish_col = $qp_has_cols ? pick_col($qp_cols, $qp_publish_candidates) : null;
 
-        // Build dynamic queries based on what we detected. We'll try several strategies.
+        $diagnostics['detected']['mapped'] = [
+            'ta_qp_col' => $ta_qp_col,
+            'ta_class_col' => $ta_class_col,
+            'ta_student_col' => $ta_student_col,
+            'qp_class_col' => $qp_class_col,
+            'qp_publish_col' => $qp_publish_col,
+            'class_id_from_students' => $class_id
+        ];
+
+        // Build strategies
         $strategies = [];
 
-        // Strategy A: test_allocation by class -> question_papers
         if ($ta_qp_col && $ta_class_col && $class_id) {
             $strategies[] = [
                 'name' => 'ta_by_class',
@@ -104,7 +142,6 @@ try {
             ];
         }
 
-        // Strategy B: test_allocation by student -> question_papers
         if ($ta_qp_col && $ta_student_col) {
             $strategies[] = [
                 'name' => 'ta_by_student',
@@ -117,7 +154,6 @@ try {
             ];
         }
 
-        // Strategy C: question_papers assigned_class column
         if ($qp_class_col && $class_id) {
             $strategies[] = [
                 'name' => 'qp_assigned_class',
@@ -128,7 +164,6 @@ try {
             ];
         }
 
-        // Strategy D: question_papers published/visible tests
         if ($qp_publish_col) {
             $strategies[] = [
                 'name' => 'qp_published',
@@ -140,7 +175,7 @@ try {
             ];
         }
 
-        // Strategy E: If no schema info, try common fallback (original style)
+        // generic fallback (original assumption)
         $strategies[] = [
             'name' => 'fallback_generic',
             'sql'  => "
@@ -153,13 +188,20 @@ try {
             'params' => [':class_id' => $class_id]
         ];
 
-        // Execute strategies in order, stop on first non-empty result
+        $diagnostics['strategies'] = array_map(function($s){ return $s['name']; }, $strategies);
+
+        // Execute strategies
         $found = false;
         foreach ($strategies as $s) {
             try {
                 $tstmt = $pdo->prepare($s['sql']);
                 $tstmt->execute($s['params']);
                 $rows = $tstmt->fetchAll();
+                $diagnostics['strategy_results'][$s['name']] = [
+                    'row_count' => count($rows),
+                    'params' => $s['params'],
+                    // do NOT include the rows here unless DEBUG true
+                ];
                 if (!empty($rows)) {
                     $tests = $rows;
                     $found = true;
@@ -169,42 +211,44 @@ try {
                     error_log("[student-dashboard] Strategy '{$s['name']}' returned no rows (student_id={$student_id})");
                 }
             } catch (PDOException $ex) {
-                // Log and continue to next
+                $diagnostics['errors'][] = "Strategy '{$s['name']}' PDO error: " . $ex->getMessage();
                 error_log("[student-dashboard] Strategy '{$s['name']}' error: " . $ex->getMessage());
             }
         }
 
-        // If still not found, optionally attempt a broad scan: all question_papers with no filters (small limit)
         if (!$found) {
             try {
                 $wide = $pdo->prepare("SELECT id, title FROM question_papers ORDER BY id DESC LIMIT 100");
                 $wide->execute();
                 $wideRows = $wide->fetchAll();
+                $diagnostics['broad_question_papers_count'] = count($wideRows);
                 if (!empty($wideRows)) {
-                    // we found papers but none were allocated specifically to the user/class
-                    // do NOT auto-show them as "assigned" — but provide a hint in logs.
-                    error_log("[student-dashboard] Found question_papers rows but none matched allocation for student_id={$student_id} — count=" . count($wideRows));
-                    // Keep $tests empty so UI shows "no assigned tests".
+                    // do not set as assigned tests
+                    error_log("[student-dashboard] question_papers exist but no allocation matched for student_id={$student_id} — count=" . count($wideRows));
                 }
             } catch (Exception $e) {
-                error_log("[student-dashboard] Broad question_papers scan failed: " . $e->getMessage());
+                $diagnostics['errors'][] = "Broad query failed: " . $e->getMessage();
             }
         }
 
-        // 3) Results (unchanged)
-        $results_stmt = $pdo->prepare("
-            SELECT COALESCE(s.name,'—') AS subject_name, qp.title AS test_name, ir.marks
-            FROM ia_results ir
-            JOIN question_papers qp ON ir.qp_id = qp.id
-            LEFT JOIN subjects s ON qp.subject_id = s.id
-            WHERE ir.student_id = :student_id
-            ORDER BY ir.id DESC
-            LIMIT 50
-        ");
-        $results_stmt->execute([':student_id' => $student_id]);
-        $results = $results_stmt->fetchAll();
+        // 3) Results
+        try {
+            $results_stmt = $pdo->prepare("
+                SELECT COALESCE(s.name,'—') AS subject_name, qp.title AS test_name, ir.marks
+                FROM ia_results ir
+                JOIN question_papers qp ON ir.qp_id = qp.id
+                LEFT JOIN subjects s ON qp.subject_id = s.id
+                WHERE ir.student_id = :student_id
+                ORDER BY ir.id DESC
+                LIMIT 50
+            ");
+            $results_stmt->execute([':student_id' => $student_id]);
+            $results = $results_stmt->fetchAll();
+        } catch (PDOException $ex) {
+            $diagnostics['errors'][] = "Results query failed: " . $ex->getMessage();
+        }
 
-        // 4) Attendance (unchanged tolerant logic)
+        // 4) Attendance
         try {
             $att_sql = "
                 SELECT COALESCE(sub.name,'Unknown Subject') AS subject_name,
@@ -256,12 +300,13 @@ try {
                 }
             }
         } catch (PDOException $attEx) {
-            error_log("[student-dashboard][attendance] " . $attEx->getMessage());
+            $diagnostics['errors'][] = "Attendance query failed: " . $attEx->getMessage();
         }
     }
 
 } catch (PDOException $e) {
     $page_error = "Error: Could not retrieve data at this time. Please try again later.";
+    $diagnostics['errors'][] = "Top-level PDOException: " . $e->getMessage() . " in " . $e->getFile() . ":" . $e->getLine();
     error_log("[student-dashboard] PDOException: " . $e->getMessage() . " in " . $e->getFile() . ":" . $e->getLine());
 }
 
@@ -272,8 +317,9 @@ foreach ($attendance_summary as $row) {
     $chart_labels[] = $row['subject'];
     $chart_data[] = $row['percent'];
 }
-?>
-<!DOCTYPE html>
+
+// === Render page ===
+?><!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="utf-8">
@@ -285,7 +331,6 @@ foreach ($attendance_summary as $row) {
         .navbar{display:flex;justify-content:space-between;align-items:center;max-width:1200px;margin:0 auto 20px;padding:10px 20px;background:rgba(141,153,174,0.08);border-radius:10px;}
         .logout-btn{padding:8px 12px;background:var(--fire-engine-red);color:#fff;text-decoration:none;border-radius:5px;font-weight:bold;}
         .layout{max-width:1200px;margin:0 auto;display:grid;grid-template-columns:1fr 420px;gap:20px;align-items:start;}
-        @media(max-width:980px){.layout{grid-template-columns:1fr;}}
         .card{background:rgba(141,153,174,0.06);padding:18px;border-radius:10px;border:1px solid rgba(141,153,174,0.12);}
         .test-list{list-style:none;padding:0;margin:0;}
         .test-list li{background:rgba(43,45,66,0.5);border-radius:8px;margin-bottom:10px;}
@@ -296,6 +341,7 @@ foreach ($attendance_summary as $row) {
         .no-data{color:var(--cool-gray);padding:12px;background:rgba(255,255,255,0.04);border-radius:6px;}
         .muted{color:var(--cool-gray);font-size:0.95rem;}
         .message.error{background-color:#f8d7da;color:#721c24;border:1px solid #f5c6cb;padding:10px;border-radius:5px;}
+        .diag { background:#fff;color:#111;padding:12px;border-radius:8px;margin-top:12px;font-family:monospace;white-space:pre-wrap; }
     </style>
 </head>
 <body>
@@ -316,7 +362,7 @@ foreach ($attendance_summary as $row) {
                 <h2 style="margin-top:0;">Available Tests</h2>
                 <?php if (empty($tests)): ?>
                     <div class="no-data">You have no new tests assigned at this time.</div>
-                    <div class="muted" style="margin-top:8px;">If you expect tests, ask your administrator to check `test_allocation` or `question_papers` table column names. Server logs contain detection notes.</div>
+                    <div class="muted" style="margin-top:8px;">If you expect tests, enable debug (temporary) to get diagnostics (see top of file).</div>
                 <?php else: ?>
                     <ul class="test-list" aria-label="Available tests">
                         <?php foreach ($tests as $test): 
@@ -398,7 +444,46 @@ foreach ($attendance_summary as $row) {
         </aside>
     </div>
 
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <?php if ($DEBUG): ?>
+        <div style="max-width:1200px;margin:20px auto;">
+            <div class="card">
+                <h3 style="margin-top:0;">Diagnostics (DEBUG mode) — Turn off after use</h3>
+                <div class="diag"><?php
+                    echo "Student ID: " . htmlspecialchars((string)$student_id, ENT_QUOTES, 'UTF-8') . "\n";
+                    echo "Detected tables/columns:\n";
+                    echo "  test_allocation: " . (!empty($diagnostics['detected']['test_allocation_columns']) ? implode(', ', $diagnostics['detected']['test_allocation_columns']) : 'NONE') . "\n";
+                    echo "  question_papers: " . (!empty($diagnostics['detected']['question_papers_columns']) ? implode(', ', $diagnostics['detected']['question_papers_columns']) : 'NONE') . "\n\n";
+                    echo "Mapped columns:\n";
+                    foreach ($diagnostics['detected']['mapped'] as $k => $v) {
+                        echo "  {$k}: " . ($v === null ? 'NULL' : $v) . "\n";
+                    }
+                    echo "\nStrategies attempted:\n";
+                    if (!empty($diagnostics['strategies'])) {
+                        foreach ($diagnostics['strategies'] as $sname) {
+                            $rc = $diagnostics['strategy_results'][$sname]['row_count'] ?? 'N/A';
+                            $params = $diagnostics['strategy_results'][$sname]['params'] ?? [];
+                            echo "  - {$sname}: rows={$rc}, params=" . json_encode($params) . "\n";
+                        }
+                    } else {
+                        echo "  (no strategies built — likely no schema info)\n";
+                    }
+                    echo "\nBroad question_papers found (count): " . ($diagnostics['broad_question_papers_count'] ?? 0) . "\n\n";
+                    if (!empty($diagnostics['errors'])) {
+                        echo "Errors / Exceptions captured:\n";
+                        foreach ($diagnostics['errors'] as $err) {
+                            echo "  * " . $err . "\n";
+                        }
+                    } else {
+                        echo "No SQL/exception errors captured.\n";
+                    }
+                ?></div>
+            </div>
+        </div>
+    <?php else: ?>
+        <!-- DEBUG is off; nothing diagnostic displayed -->
+    <?php endif; ?>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script>
     (function() {
         const labels = <?= json_encode($chart_labels, JSON_UNESCAPED_UNICODE) ?>;
