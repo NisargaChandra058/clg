@@ -1,7 +1,29 @@
 <?php
-session_start();
-// 1. Include the correct PDO database connection
-include('db-config.php'); 
+// student-login.php - Student login with corrected session variables
+declare(strict_types=1);
+
+// Temporary debug flag via ?debug=1 (remove in production)
+$DEBUG = isset($_GET['debug']) && $_GET['debug'] === '1';
+
+// Start session
+if (session_status() === PHP_SESSION_NONE) session_start();
+
+// Show debug info early when asked
+if ($DEBUG) {
+    echo "<div style='font-family:monospace;padding:10px;background:#f1f5f9;border:1px solid #e2e8f0;margin:10px 0;'>";
+    echo "<strong>DEBUG (Login)</strong><br>";
+    echo "Session id: " . htmlspecialchars(session_id()) . "<br>";
+    echo "Session array: <pre>" . htmlspecialchars(print_r($_SESSION, true)) . "</pre>";
+    echo "Cookies: <pre>" . htmlspecialchars(print_r($_COOKIE, true)) . "</pre>";
+    echo "</div>";
+}
+
+// dev error display (disable in production)
+error_reporting(E_ALL);
+ini_set('display_errors', '1');
+
+// 1. Include the correct PDO database connection (aligned with dashboard/ia-results)
+require_once __DIR__ . '/db.php';  // Assumes db.php sets $pdo; adjust if path differs
 
 $error = ""; // Variable to hold login error messages
 
@@ -17,7 +39,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
         try {
             // 2. Prepare the query using PDO
             // Fetching from the 'students' table
-            $stmt = $conn->prepare("SELECT id, email, password FROM students WHERE email = ?");
+            $stmt = $pdo->prepare("SELECT id, email, password FROM students WHERE email = ?");
             
             // 3. Execute the query with the email parameter
             $stmt->execute([$email]);
@@ -27,12 +49,11 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
 
             // 5. Verify if student exists and password matches
             if ($student && password_verify($password, $student['password'])) {
-                // Password is correct, set session variables
+                // Password is correct, set session variables (aligned with dashboard/ia-results)
                 session_regenerate_id(true); // Prevent session fixation
-                $_SESSION['student_id'] = $student['id'];
-                $_SESSION['student_email'] = $student['email'];
-                // Optional: Set a general 'role' for consistency if needed elsewhere
-                // $_SESSION['role'] = 'student'; 
+                $_SESSION['user_id'] = $student['id'];  // Set user_id to students.id
+                $_SESSION['role'] = 'student';  // Set role for consistency
+                $_SESSION['student_email'] = $student['email'];  // Keep for display
                 
                 // Redirect to the student dashboard
                 header("Location: student-dashboard.php"); // Assuming this is the correct dashboard file
