@@ -22,8 +22,8 @@ if ($DEBUG) {
 error_reporting(E_ALL);
 ini_set('display_errors', '1');
 
-// require DB (must set $pdo)
-require_once __DIR__ . '/db.php';
+// require DB (aligned with dashboard/login; assumes db-config.php sets $conn)
+include('../db-config.php');  // Adjust path if db-config.php is elsewhere
 
 // Normalize role check
 $role = strtolower(trim((string)($_SESSION['role'] ?? '')));
@@ -45,14 +45,14 @@ $resolve_log = [];
 
 try {
     // Attempt 1: students.user_id = user_id (preferred if available)
-    $stmt = $pdo->prepare("SELECT * FROM students WHERE user_id = :uid LIMIT 1");
+    $stmt = $conn->prepare("SELECT * FROM students WHERE user_id = :uid LIMIT 1");
     $stmt->execute(['uid' => $user_id]);
     $student = $stmt->fetch(PDO::FETCH_ASSOC);
     $resolve_log[] = 'attempt students.user_id => ' . ($student ? 'FOUND (id=' . $student['id'] . ')' : 'no');
 
     // Attempt 2: maybe your login used the student id directly -> students.id = user_id
     if (!$student) {
-        $stmt = $pdo->prepare("SELECT * FROM students WHERE id = :id LIMIT 1");
+        $stmt = $conn->prepare("SELECT * FROM students WHERE id = :id LIMIT 1");
         $stmt->execute(['id' => $user_id]);
         $student = $stmt->fetch(PDO::FETCH_ASSOC);
         $resolve_log[] = 'attempt students.id => ' . ($student ? 'FOUND (id=' . $student['id'] . ')' : 'no');
@@ -60,13 +60,13 @@ try {
 
     // Attempt 3: fallback via users.email -> students.email
     if (!$student) {
-        $stmt = $pdo->prepare("SELECT email FROM users WHERE id = :id LIMIT 1");
+        $stmt = $conn->prepare("SELECT email FROM users WHERE id = :id LIMIT 1");
         $stmt->execute(['id' => $user_id]);
         $user_email = $stmt->fetchColumn();
         $resolve_log[] = 'fetched users.email => ' . ($user_email ?: 'none');
 
         if ($user_email) {
-            $stmt = $pdo->prepare("SELECT * FROM students WHERE LOWER(TRIM(email)) = :email LIMIT 1");
+            $stmt = $conn->prepare("SELECT * FROM students WHERE LOWER(TRIM(email)) = :email LIMIT 1");
             $stmt->execute(['email' => strtolower(trim($user_email))]);
             $student = $stmt->fetch(PDO::FETCH_ASSOC);
             $resolve_log[] = 'attempt students.email match => ' . ($student ? 'FOUND (id=' . $student['id'] . ')' : 'no');
@@ -106,7 +106,7 @@ try {
         WHERE ir.student_id = :sid
         ORDER BY COALESCE(ir.created_at, ir.id) DESC
     ";
-    $stmt = $pdo->prepare($sql);
+    $stmt = $conn->prepare($sql);
     $stmt->execute(['sid' => $student_id]);
     $results = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
