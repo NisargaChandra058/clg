@@ -1,236 +1,130 @@
 <?php
 session_start();
-include('db-config.php'); 
+require_once 'db.php'; // PDO Connection
 
-// Ensure only staff or HOD can access
-$allowed_roles = ['staff', 'hod'];
-if (!isset($_SESSION['role']) || !in_array($_SESSION['role'], $allowed_roles)) {
-    header("Location: login.php");
-    exit;
+// 1. Authorization Check
+// Allow Admin, Staff, HOD, Principal
+$allowed_roles = ['admin', 'staff', 'hod', 'principal'];
+if (!isset($_SESSION['role']) || !in_array(strtolower($_SESSION['role']), $allowed_roles)) {
+    die("Access Denied. Staff only.");
 }
-$staff_id = $_SESSION['user_id'];
 
-// Determine the correct dashboard link based on role
-$dashboard_link = match ($_SESSION['role']) {
-    'staff' => 'staff_dashboard.php',
-    'hod' => 'hod_dashboard.php',
-    default => 'login.php', // Fallback
-};
+$message = '';
 
-$message = ""; 
-$message_type = "error"; 
-$allocated_subjects = [];
-$students_in_class = [];
-$selected_subject_id = null;
-$selected_date = date('Y-m-d'); // Default to today
+// 2. Handle Form Submission
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $student_id = filter_input(INPUT_POST, 'student_id', FILTER_VALIDATE_INT);
+    $qp_id      = filter_input(INPUT_POST, 'qp_id', FILTER_VALIDATE_INT);
+    $marks      = filter_input(INPUT_POST, 'marks', FILTER_VALIDATE_INT);
+    $max_marks  = filter_input(INPUT_POST, 'max_marks', FILTER_VALIDATE_INT);
 
+    if ($student_id && $qp_id && $marks !== null) {
+        try {
+            // Ensure table columns exist (Self-Healing)
+            try { $pdo->exec("ALTER TABLE ia_results ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"); } catch(Exception $e){}
+            try { $pdo->exec("ALTER TABLE ia_results ADD COLUMN IF NOT EXISTS max_marks INT DEFAULT 100"); } catch(Exception $e){}
+
+            // Upsert (Insert or Update if exists)
+            $stmt = $pdo->prepare("
+                INSERT INTO ia_results (student_id, qp_id, marks, max_marks) 
+                VALUES (:sid, :qid, :marks, :max)
+                ON CONFLICT (student_id, qp_id) 
+                DO UPDATE SET marks = EXCLUDED.marks, max_marks = EXCLUDED.max_marks, created_at = NOW()
+            ");
+            
+            $stmt->execute([
+                ':sid' => $student_id,
+                ':qid' => $qp_id,
+                ':marks' => $marks,
+                ':max' => $max_marks ?: 100
+            ]);
+
+            $message = "<div class='message success'>✅ Result saved successfully!</div>";
+        } catch (PDOException $e) {
+            $message = "<div class='message error'>Database Error: " . htmlspecialchars($e->getMessage()) . "</div>";
+        }
+    } else {
+        $message = "<div class='message error'>⚠️ Please select all fields.</div>";
+    }
+}
+
+// 3. Fetch Data for Dropdowns
 try {
-    // --- STEP 1: Fetch Subjects Allocated to Staff ---
-    // Fetch subjects allocated to the current staff member
-    $stmt_subjects = $conn->prepare("
-        SELECT s.id, s.name, s.subject_code, s.branch, s.semester 
-        FROM subjects s
-        JOIN subject_allocation sa ON s.id = sa.subject_id
-        WHERE sa.staff_id = ?
-        ORDER BY s.semester, s.name
-    ");
-    $stmt_subjects->execute([$staff_id]);
-    $allocated_subjects = $stmt_subjects->fetchAll(PDO::FETCH_ASSOC);
-
-    // --- STEP 2: Handle Selection of Subject and Date (via GET) ---
-    if (isset($_GET['subject_id']) && isset($_GET['attendance_date'])) {
-        $selected_subject_id = filter_input(INPUT_GET, 'subject_id', FILTER_VALIDATE_INT);
-        $selected_date = date('Y-m-d', strtotime($_GET['attendance_date'])); // Validate/format date
-
-        // Find the selected subject details to get branch/semester
-        $selected_subject_details = null;
-        foreach ($allocated_subjects as $subj) {
-            if ($subj['id'] == $selected_subject_id) {
-                $selected_subject_details = $subj;
-                break;
-            }
-        }
-
-        if ($selected_subject_id && $selected_subject_details) {
-            // --- Fetch Students for the selected class (based on subject's branch & semester) ---
-            // Assumes students table has 'branch' and needs 'semester' column added, or requires a different join
-            // For now, filtering by BRANCH only as student table has branch. Add semester filter if available.
-             $stmt_students = $conn->prepare("
-                 SELECT id, name, usn 
-                 FROM students 
-                 WHERE branch = ? 
-                 -- AND semester = ? -- Add this if semester column exists on students table
-                 ORDER BY name ASC
-             ");
-             // Execute with branch (and semester if added)
-             $student_params = [$selected_subject_details['branch']];
-             // if (isset($selected_subject_details['semester'])) { $student_params[] = $selected_subject_details['semester']; }
-             $stmt_students->execute($student_params);
-             $students_in_class = $stmt_students->fetchAll(PDO::FETCH_ASSOC);
-        } else {
-             $message = "Invalid subject selected or subject not allocated to you.";
-        }
-    }
+    // FIX: Use 'student_name' instead of 'name'
+    $students = $pdo->query("SELECT id, student_name, usn FROM students ORDER BY student_name ASC")->fetchAll(PDO::FETCH_ASSOC);
     
-    // --- STEP 3: Handle Submission of Attendance (via POST) ---
-    if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['submit_attendance'])) {
-         $submitted_subject_id = filter_input(INPUT_POST, 'subject_id', FILTER_VALIDATE_INT);
-         $submitted_date = date('Y-m-d', strtotime($_POST['attendance_date']));
-         $present_student_ids = $_POST['student_ids'] ?? []; // All students displayed
-         $absent_student_ids = $_POST['is_absent'] ?? [];   // Only IDs of those marked absent
-
-         if ($submitted_subject_id && $submitted_date && !empty($present_student_ids)) {
-             $conn->beginTransaction();
-
-             $sql_upsert = "INSERT INTO daily_attendance (student_id, subject_id, attendance_date, status, marked_by_staff_id) 
-                            VALUES (?, ?, ?, ?, ?)
-                            ON CONFLICT (student_id, subject_id, attendance_date) 
-                            DO UPDATE SET 
-                                status = EXCLUDED.status, 
-                                marked_by_staff_id = EXCLUDED.marked_by_staff_id";
-             $stmt_upsert = $conn->prepare($sql_upsert);
-             
-             $success_count = 0;
-             foreach ($present_student_ids as $student_id) {
-                  $student_id_int = filter_var($student_id, FILTER_VALIDATE_INT);
-                  if($student_id_int) {
-                      // Determine status: Present unless checked in absent list
-                      $status = in_array($student_id, $absent_student_ids) ? 'Absent' : 'Present';
-                      
-                      if($stmt_upsert->execute([$student_id_int, $submitted_subject_id, $submitted_date, $status, $staff_id])) {
-                          $success_count++;
-                      } else {
-                           // If one fails, roll back all
-                           $conn->rollBack();
-                           throw new PDOException("Failed to save attendance for student ID: $student_id_int");
-                      }
-                  }
-             }
-
-             $conn->commit();
-             $message = "Attendance for " . $success_count . " students recorded successfully for " . date('d-M-Y', strtotime($submitted_date)) . ".";
-             $message_type = "success";
-             // Clear selection to go back to step 1
-             $selected_subject_id = null; 
-             $students_in_class = [];
-
-         } else {
-              $message = "Invalid data submitted.";
-         }
-    }
-
+    // Fetch Tests (Question Papers)
+    $tests = $pdo->query("SELECT id, title, subject_id FROM question_papers ORDER BY title ASC")->fetchAll(PDO::FETCH_ASSOC);
 
 } catch (PDOException $e) {
-    if ($conn->inTransaction()) { $conn->rollBack(); }
-    $message = "Database Error: " . $e->getMessage();
-} catch (Exception $e) {
-     $message = "Error: " . $e->getMessage();
+    die("Data Error: " . $e->getMessage());
 }
 ?>
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Daily Attendance</title>
+    <title>Enter Results</title>
     <style>
-        body { font-family: Arial, sans-serif; margin: 0; padding: 0; background-color: #f4f4f9; color: #333; }
-        .navbar { background-color: #007bff; padding: 1em; display: flex; justify-content: flex-end; gap: 1em; }
-        .navbar a { color: #fff; text-decoration: none; padding: 0.5em 1em; border-radius: 5px; }
-        .container { width: 90%; max-width: 800px; margin: 20px auto; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
-        h2, h3 { color: #444; text-align: center; margin-bottom: 1.5em;}
-        label { font-weight: bold; color: #555; margin-bottom: 5px; display: block; }
-        input[type="date"], select { width: 100%; padding: 10px; margin-bottom: 15px; border-radius: 4px; font-size: 16px; box-sizing: border-box; border: 1px solid #ddd; }
-        button { background-color: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 5px; font-size: 16px; cursor: pointer; transition: background-color 0.3s; }
-        button:hover { background-color: #0056b3; }
-        .message { padding: 15px; margin-bottom: 20px; border-radius: 5px; text-align: center; border: 1px solid transparent; }
-        .message.success { background-color: #d4edda; color: #155724; border-color: #c3e6cb; }
-        .message.error { background-color: #f8d7da; color: #721c24; border-color: #f5c6cb; }
-        .student-list table { width: 100%; border-collapse: collapse; margin-top: 1em; }
-        .student-list th, .student-list td { border: 1px solid #ddd; padding: 0.75em; text-align: left; }
-        .student-list th { background-color: #eee; }
-        .student-list td.actions { text-align: center; }
-        .student-list input[type="checkbox"] { width: 1.3em; height: 1.3em; } /* Larger checkbox */
-        .submit-attendance-btn { background-color: #28a745; margin-top: 20px; font-weight: bold; }
-        .submit-attendance-btn:hover { background-color: #218838; }
-        .back-link { display: block; margin-top: 20px; text-align: center; color: #007bff; }
-        hr { margin: 30px 0; border: 0; border-top: 1px solid #eee; }
+        body { font-family: 'Segoe UI', sans-serif; background: #f4f7f6; padding: 20px; }
+        .container { max-width: 500px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }
+        h2 { text-align: center; color: #333; border-bottom: 2px solid #007bff; padding-bottom: 10px; margin-bottom: 20px; }
+        
+        label { font-weight: bold; display: block; margin-top: 15px; color: #555; }
+        select, input { width: 100%; padding: 10px; margin-top: 5px; border: 1px solid #ccc; border-radius: 5px; box-sizing: border-box; font-size: 16px; }
+        
+        button { width: 100%; padding: 12px; background: #007bff; color: white; border: none; border-radius: 5px; font-size: 18px; font-weight: bold; margin-top: 25px; cursor: pointer; transition: 0.3s; }
+        button:hover { background: #0056b3; }
+        
+        .message { padding: 10px; margin-bottom: 15px; border-radius: 5px; text-align: center; font-weight: bold; }
+        .success { background: #d4edda; color: #155724; }
+        .error { background: #f8d7da; color: #721c24; }
+        .back-link { display: block; text-align: center; margin-top: 20px; color: #666; text-decoration: none; }
     </style>
 </head>
 <body>
-    <div class="navbar">
-        <a href="<?= htmlspecialchars($dashboard_link) ?>">Back to Dashboard</a>
-        <a href="logout.php">Logout</a>
-    </div>
 
-    <div class="container">
-        <h2>Take Daily Attendance</h2>
+<div class="container">
+    <h2>Enter IA Results</h2>
+    <?= $message ?>
 
-        <?php if (!empty($message)) { echo "<div class='message " . htmlspecialchars($message_type) . "'>" . htmlspecialchars($message) . "</div>"; } ?>
+    <form method="POST">
+        <!-- Student Dropdown -->
+        <label>Student:</label>
+        <select name="student_id" required>
+            <option value="">-- Select Student --</option>
+            <?php foreach ($students as $s): ?>
+                <option value="<?= $s['id'] ?>">
+                    <?= htmlspecialchars($s['student_name']) ?> (<?= htmlspecialchars($s['usn'] ?? '') ?>)
+                </option>
+            <?php endforeach; ?>
+        </select>
 
-        <!-- STEP 1 & 2: Select Subject and Date -->
-        <form action="enter-attendance-daily.php" method="GET">
-             <h3>Select Class</h3>
-             <label for="attendance_date">Date:</label>
-             <input type="date" id="attendance_date" name="attendance_date" value="<?= htmlspecialchars($selected_date) ?>" required>
+        <!-- Test Dropdown -->
+        <label>Test / Exam:</label>
+        <select name="qp_id" required>
+            <option value="">-- Select Test --</option>
+            <?php foreach ($tests as $t): ?>
+                <option value="<?= $t['id'] ?>">
+                    <?= htmlspecialchars($t['title']) ?>
+                </option>
+            <?php endforeach; ?>
+        </select>
 
-             <label for="subject_id">Subject:</label>
-             <select name="subject_id" id="subject_id" required>
-                 <option value="" disabled <?= !$selected_subject_id ? 'selected' : '' ?>>-- Select Subject --</option>
-                 <?php foreach ($allocated_subjects as $subject): ?>
-                     <option value="<?= $subject['id'] ?>" <?= ($selected_subject_id == $subject['id']) ? 'selected' : '' ?>>
-                         <?= htmlspecialchars($subject['subject_code'] . ' - ' . $subject['name'] . ' (Sem ' . $subject['semester'] . ', ' . $subject['branch'] . ')') ?>
-                     </option>
-                 <?php endforeach; ?>
-                  <?php if (empty($allocated_subjects)): ?>
-                     <option value="" disabled>No subjects allocated to you.</option>
-                 <?php endif; ?>
-             </select>
-             
-             <button type="submit">Load Student List</button>
-        </form>
+        <!-- Marks -->
+        <label>Marks Obtained:</label>
+        <input type="number" name="marks" required placeholder="e.g. 25">
 
-        <?php if ($selected_subject_id && !empty($students_in_class)): ?>
-            <hr>
-            <!-- STEP 3: Mark Absentees and Submit -->
-            <form action="enter-attendance-daily.php" method="POST" class="student-list">
-                 <h3>Mark Absentees for <?= date('d-M-Y', strtotime($selected_date)) ?></h3>
-                 <input type="hidden" name="subject_id" value="<?= htmlspecialchars($selected_subject_id) ?>">
-                 <input type="hidden" name="attendance_date" value="<?= htmlspecialchars($selected_date) ?>">
-                 
-                 <table>
-                     <thead>
-                         <tr>
-                             <th>USN</th>
-                             <th>Student Name</th>
-                             <th>Mark Absent</th>
-                         </tr>
-                     </thead>
-                     <tbody>
-                         <?php foreach ($students_in_class as $student): ?>
-                             <tr>
-                                 <td><?= htmlspecialchars($student['usn']) ?></td>
-                                 <td><?= htmlspecialchars($student['name']) ?></td>
-                                 <td class="actions">
-                                     <!-- Hidden input containing all student IDs -->
-                                     <input type="hidden" name="student_ids[]" value="<?= $student['id'] ?>">
-                                     <!-- Checkbox for marking absent, value is the student ID -->
-                                     <input type="checkbox" name="is_absent[]" value="<?= $student['id'] ?>" title="Check if Absent">
-                                 </td>
-                             </tr>
-                         <?php endforeach; ?>
-                     </tbody>
-                 </table>
-                 
-                 <button type="submit" name="submit_attendance" class="submit-attendance-btn" onclick="return confirm('Submit attendance for <?= count($students_in_class) ?> students?')">Submit Attendance</button>
-            </form>
-        
-        <?php elseif ($selected_subject_id && empty($students_in_class)): ?>
-             <hr>
-             <p style="text-align:center; color: #777;">No students found for the selected subject's branch/semester.</p>
-        <?php endif; ?>
-        
-        <a href="<?= htmlspecialchars($dashboard_link) ?>" class="back-link">Cancel</a>
-    </div>
+        <label>Total / Max Marks:</label>
+        <input type="number" name="max_marks" value="100" required>
+
+        <button type="submit">Submit Result</button>
+    </form>
+
+    <a href="admin-panel.php" class="back-link">Back to Dashboard</a>
+</div>
+
 </body>
 </html>
