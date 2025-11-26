@@ -1,176 +1,243 @@
 <?php
-// ia-results.php - robust student-resolution + results display
-declare(strict_types=1);
-
-// Temporary debug flag via ?debug=1 (remove in production)
-$DEBUG = isset($_GET['debug']) && $_GET['debug'] === '1';
-
-// Start session
-if (session_status() === PHP_SESSION_NONE) session_start();
-
-// Show debug info early when asked
-if ($DEBUG) {
-    echo "<div style='font-family:monospace;padding:10px;background:#f1f5f9;border:1px solid #e2e8f0;margin:10px 0;'>";
-    echo "<strong>DEBUG</strong><br>";
-    echo "Session id: " . htmlspecialchars(session_id()) . "<br>";
-    echo "Session array: <pre>" . htmlspecialchars(print_r($_SESSION, true)) . "</pre>";
-    echo "Cookies: <pre>" . htmlspecialchars(print_r($_COOKIE, true)) . "</pre>";
-    echo "</div>";
-}
-
-// dev error display (disable in production)
+// view-result.php
 error_reporting(E_ALL);
-ini_set('display_errors', '1');
+ini_set('display_errors', 1);
 
-// require DB (aligned with dashboard/login; assumes db-config.php sets $conn)
-include('db-config.php');  // Fixed path: same directory as other files
+session_start();
+require_once('db.php'); // expects $pdo (PDO) connected to your PostgreSQL DB
 
-// Normalize role check
-$role = strtolower(trim((string)($_SESSION['role'] ?? '')));
-if (!isset($_SESSION['user_id']) || $role !== 'student') {
-    if ($DEBUG) {
-        echo "<div style='padding:12px;background:#fff5f5;border:1px solid #fee2e2;color:#7f1d1d;'>";
-        echo "<h3>Auth Debug</h3>";
-        echo "<p>Session missing required keys or role != 'student'.</p>";
-        echo "</div>";
-        exit;
-    }
+// Config
+$PASS_PERCENT = 40; // pass threshold (in percent)
+
+// Require student login
+if (!isset($_SESSION['student_id'])) {
     header('Location: student-login.php');
     exit;
 }
+$student_id = (int) $_SESSION['student_id'];
 
-$user_id = (int) $_SESSION['user_id'];
-$student = null;
-$resolve_log = [];
+// Get test id from GET
+$test_id = filter_input(INPUT_GET, 'id', FILTER_VALIDATE_INT);
+if (!$test_id) {
+    die("Invalid or missing test id. Open the page as: view-result.php?id=1");
+}
 
 try {
-    // Attempt 1: students.user_id = user_id (preferred if available)
-    $stmt = $conn->prepare("SELECT * FROM students WHERE user_id = :uid LIMIT 1");
-    $stmt->execute(['uid' => $user_id]);
-    $student = $stmt->fetch(PDO::FETCH_ASSOC);
-    $resolve_log[] = 'attempt students.user_id => ' . ($student ? 'FOUND (id=' . $student['id'] . ')' : 'no');
-
-    // Attempt 2: maybe your login used the student id directly -> students.id = user_id
-    if (!$student) {
-        $stmt = $conn->prepare("SELECT * FROM students WHERE id = :id LIMIT 1");
-        $stmt->execute(['id' => $user_id]);
-        $student = $stmt->fetch(PDO::FETCH_ASSOC);
-        $resolve_log[] = 'attempt students.id => ' . ($student ? 'FOUND (id=' . $student['id'] . ')' : 'no');
+    // Fetch question paper
+    $qStmt = $pdo->prepare("SELECT id, title, content FROM question_papers WHERE id = :id LIMIT 1");
+    $qStmt->execute([':id' => $test_id]);
+    $test = $qStmt->fetch(PDO::FETCH_ASSOC);
+    if (!$test) {
+        throw new Exception("Test not found (id={$test_id}).");
     }
 
-    // Attempt 3: fallback via users.email -> students.email
-    if (!$student) {
-        $stmt = $conn->prepare("SELECT email FROM users WHERE id = :id LIMIT 1");
-        $stmt->execute(['id' => $user_id]);
-        $user_email = $stmt->fetchColumn();
-        $resolve_log[] = 'fetched users.email => ' . ($user_email ?: 'none');
+    $raw_content = $test['content'] ?? '';
 
-        if ($user_email) {
-            $stmt = $conn->prepare("SELECT * FROM students WHERE LOWER(TRIM(email)) = :email LIMIT 1");
-            $stmt->execute(['email' => strtolower(trim($user_email))]);
-            $student = $stmt->fetch(PDO::FETCH_ASSOC);
-            $resolve_log[] = 'attempt students.email match => ' . ($student ? 'FOUND (id=' . $student['id'] . ')' : 'no');
+    // Try to decode questions as JSON. If not JSON, treat as plain-text single-item test.
+    $questions = null;
+    $decoded = json_decode($raw_content, true);
+    if (is_array($decoded)) {
+        // Expect an array of question objects
+        $questions = $decoded;
+    } else {
+        // Plain text fallback: create a single-question array (essay type)
+        $questions = [
+            [
+                'question' => (string)$raw_content,
+                'options'  => null,
+                'correct'  => null,
+                'marks'    => null
+            ]
+        ];
+    }
+
+    // Fetch student's submission (if any)
+    $resStmt = $pdo->prepare("SELECT id, marks, content, created_at, updated_at FROM ia_results WHERE student_id = :sid AND qp_id = :qid LIMIT 1");
+    $resStmt->execute([':sid' => $student_id, ':qid' => $test_id]);
+    $submission = $resStmt->fetch(PDO::FETCH_ASSOC);
+    $has_submission = (bool)$submission;
+
+    // Decode student's saved answers/content if JSON; otherwise keep as plain text
+    $student_answers = null;
+    if ($has_submission) {
+        $saved = $submission['content'] ?? '';
+        $decodedStudent = json_decode($saved, true);
+        if ($decodedStudent !== null) {
+            $student_answers = $decodedStudent;
         } else {
-            $resolve_log[] = 'skipped students.email attempt (no user email)';
+            // keep raw text (essay-style)
+            $student_answers = $saved;
         }
     }
 
-    if (!$student) {
-        // Show debug info (if debug) or friendly message
-        if ($DEBUG) {
-            echo "<div style='font-family:monospace;padding:12px;background:#fff7ed;border:1px solid #ffedd5;'>";
-            echo "<h3>Resolve attempts</h3><pre>" . htmlspecialchars(print_r($resolve_log, true)) . "</pre>";
-            echo "<p>ia_results table screenshot: /mnt/data/dc95d872-b0a6-4c6e-b999-d150e16d6c14.png</p>";
-            echo "</div>";
-            exit;
+    // Prepare per-question grading info
+    $max_marks = 0;
+    $recomputed_marks = 0;
+    $per_question = [];
+
+    foreach ($questions as $idx => $q) {
+        $q_text = $q['question'] ?? '';
+        $q_options = $q['options'] ?? null; // array e.g. ['a'=>'..','b'=>'..']
+        $q_correct = array_key_exists('correct', $q) ? $q['correct'] : null;
+        $q_marks = isset($q['marks']) ? (int)$q['marks'] : 1; // default 1 if not provided
+
+        $max_marks += $q_marks;
+
+        // Determine student's answer for this index
+        $student_choice = null;
+        if (is_array($student_answers)) {
+            // try numeric index and string index
+            if (array_key_exists($idx, $student_answers)) $student_choice = $student_answers[$idx];
+            elseif (array_key_exists((string)$idx, $student_answers)) $student_choice = $student_answers[(string)$idx];
+            else {
+                // sometimes answers might be keyed by question id; try question id if present
+                if (isset($q['id']) && array_key_exists((string)$q['id'], $student_answers)) {
+                    $student_choice = $student_answers[(string)$q['id']];
+                }
+            }
+        } elseif (is_string($student_answers) || is_numeric($student_answers)) {
+            // essay-style: use whole string for first question
+            if ($idx === 0) $student_choice = $student_answers;
         }
-        die("<div style='padding:20px;font-family:Inter,sans-serif;text-align:center;color:#721c24;background:#f8d7da;'>
-                <h2>❌ Student Profile Not Found</h2>
-                <p>Your login is valid but no linked student record exists. Ask admin to link your account.</p>
-             </div>");
+
+        $is_correct = null;
+        if ($q_correct !== null && $student_choice !== null) {
+            // strict string comparison
+            if ((string)$student_choice === (string)$q_correct) {
+                $is_correct = true;
+                $recomputed_marks += $q_marks;
+            } else {
+                $is_correct = false;
+            }
+        }
+
+        $per_question[$idx] = [
+            'question' => $q_text,
+            'options'  => $q_options,
+            'correct'  => $q_correct,
+            'student'  => $student_choice,
+            'marks'    => $q_marks,
+            'is_correct' => $is_correct
+        ];
     }
 
-    $student_id = (int)$student['id'];
+    // Determine marks to display: prefer stored marks in DB, else recomputed
+    $stored_marks = $submission['marks'] ?? null;
+    $display_marks = (is_numeric($stored_marks) ? (int)$stored_marks : $recomputed_marks);
+    $percentage = ($max_marks > 0) ? round(($display_marks / $max_marks) * 100, 2) : 0;
+    $passed = $percentage >= $PASS_PERCENT;
 
-    // Fetch IA results (LEFT JOIN so missing qp/subject won't drop rows)
-    $sql = "
-        SELECT
-            COALESCE(s.name, 'General') AS subject_name,
-            COALESCE(qp.title, CONCAT('Deleted Paper (ID:', ir.qp_id, ')')) AS test_name,
-            ir.marks,
-            ir.max_marks,
-            ir.created_at
-        FROM ia_results ir
-        LEFT JOIN question_papers qp ON ir.qp_id = qp.id
-        LEFT JOIN subjects s ON qp.subject_id = s.id
-        WHERE ir.student_id = :sid
-        ORDER BY COALESCE(ir.created_at, ir.id) DESC
-    ";
-    $stmt = $conn->prepare($sql);
-    $stmt->execute(['sid' => $student_id]);
-    $results = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
-} catch (PDOException $e) {
-    if ($DEBUG) {
-        echo "<pre style='color:#b91c1c;'>" . htmlspecialchars($e->getMessage()) . "</pre>";
-        exit;
-    }
-    error_log("DB error: " . $e->getMessage());
-    die("Database error. Contact admin.");
+} catch (Exception $e) {
+    // Friendly error page
+    $err = htmlspecialchars($e->getMessage());
+    echo <<<HTML
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Error</title></head>
+<body style="font-family:Arial,sans-serif;padding:20px;">
+<h2>Error</h2>
+<p>{$err}</p>
+<p><a href="student-dashboard.php">&laquo; Back to Dashboard</a></p>
+</body></html>
+HTML;
+    exit;
 }
 
-// If debug, show resolve log
-if ($DEBUG) {
-    echo "<div style='font-family:monospace;padding:10px;background:#f8fafc;border:1px solid #e2e8f0;margin:10px 0;'><strong>Resolve log</strong><pre>"
-         . htmlspecialchars(print_r($resolve_log, true)) . "</pre></div>";
-}
-
-// Render results (same styling as before)
-?><!doctype html>
+// Render the result page
+?>
+<!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>IA Results</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+<meta charset="utf-8" />
+<title>Result — <?= htmlspecialchars($test['title']) ?></title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
 <style>
-body{font-family:'Inter',sans-serif;background:#f1f5f9;margin:0;padding:40px 20px;color:#334155}
-.container{max-width:900px;margin:0 auto;background:#fff;padding:30px;border-radius:12px;box-shadow:0 6px 18px rgba(2,6,23,0.06)}
-.header-wrap{text-align:center}
-h2{display:inline-block;margin:0 0 18px;padding-bottom:10px;border-bottom:3px solid #3b82f6;color:#0f172a}
-table{width:100%;border-collapse:collapse;margin-top:16px}
-th{background:#f8fafc;color:#64748b;padding:14px;text-align:left;font-weight:600;border-bottom:2px solid #e2e8f0}
-td{padding:14px;border-bottom:1px solid #e2e8f0;font-size:0.95rem}
-.score-badge{background:#dcfce7;color:#166534;padding:6px 12px;border-radius:20px;font-weight:700}
-.date-text{color:#94a3b8;font-size:0.85rem}
-.no-records{text-align:center;padding:36px;color:#94a3b8;font-style:italic;background:#f8fafc;border-radius:8px;border:1px dashed #cbd5e1}
+    :root { --bg:#2b2d42; --muted:#8d99ae; --accent:#d90429; --light:#fff; }
+    body{font-family:Arial,Helvetica,sans-serif;background:var(--bg);color:var(--light);margin:0;padding:20px;}
+    .wrap{max-width:900px;margin:18px auto;}
+    .card{background:rgba(141,153,174,0.06);padding:18px;border-radius:10px;border:1px solid rgba(141,153,174,0.12);}
+    h1{margin:0 0 8px}
+    .meta{color:var(--muted);margin-bottom:12px}
+    .score-box{background:#fff;color:#111;padding:12px;border-radius:8px;margin-bottom:16px}
+    .q{background:#fff;color:#111;padding:12px;border-radius:6px;margin-bottom:10px}
+    .q .q-head{font-weight:700;margin-bottom:8px}
+    .option{margin-left:12px}
+    .correct{color:green;font-weight:700}
+    .wrong{color:#b52d3b;font-weight:700}
+    .note{color:var(--muted);font-size:0.95rem}
+    a.back{display:inline-block;margin-top:10px;color:var(--muted);text-decoration:none}
 </style>
 </head>
 <body>
-<div class="container">
-  <div class="header-wrap">
-    <h2>🏆 Internal Assessment Results</h2>
-    <div style="color:#64748b;margin-top:8px">Student: <?= htmlspecialchars($student['student_name'] ?? ($student['name'] ?? 'Student')) ?> &nbsp; | &nbsp; <?= htmlspecialchars($student['usn'] ?? '') ?></div>
-  </div>
+<div class="wrap">
+    <div class="card">
+        <h1>Result: <?= htmlspecialchars($test['title']) ?></h1>
+        <div class="meta">Student ID: <?= htmlspecialchars($student_id) ?> &nbsp; | &nbsp; Test ID: <?= htmlspecialchars($test_id) ?></div>
 
-  <?php if (empty($results)): ?>
-    <div class="no-records">You haven't completed any tests yet.</div>
-  <?php else: ?>
-    <table>
-      <thead><tr><th>Subject</th><th>Test Name</th><th>Score</th><th>Date</th></tr></thead>
-      <tbody>
-        <?php foreach ($results as $r): ?>
-          <tr>
-            <td style="font-weight:600;color:#0f172a;"><?= htmlspecialchars($r['subject_name'] ?? 'General') ?></td>
-            <td><?= htmlspecialchars($r['test_name'] ?? 'Untitled') ?></td>
-            <td><span class="score-badge"><?= htmlspecialchars($r['marks'] ?? '0') ?> / <?= htmlspecialchars($r['max_marks'] ?? '0') ?></span></td>
-            <td class="date-text"><?= !empty($r['created_at']) ? htmlspecialchars(date('M d, Y', strtotime($r['created_at']))) : 'N/A' ?></td>
-          </tr>
-        <?php endforeach; ?>
-      </tbody>
-    </table>
-  <?php endif; ?>
+        <?php if (!$has_submission): ?>
+            <div class="score-box">
+                <strong>No submission found.</strong>
+                <p class="note">You haven't submitted this test yet. <a href="take-test.php?id=<?= htmlspecialchars($test_id) ?>">Take the test now</a>.</p>
+            </div>
+        <?php else: ?>
+            <div class="score-box">
+                <div><strong>Marks:</strong> <?= htmlspecialchars($display_marks) ?> / <?= htmlspecialchars($max_marks) ?></div>
+                <div><strong>Percentage:</strong> <?= htmlspecialchars($percentage) ?>%</div>
+                <div><strong>Result:</strong> 
+                    <?php if ($passed): ?>
+                        <span style="color:green;font-weight:700">Passed</span>
+                    <?php else: ?>
+                        <span style="color:#b52d3b;font-weight:700">Failed</span>
+                    <?php endif; ?>
+                </div>
+                <?php if (!empty($submission['updated_at'])): ?>
+                    <div class="meta">Submitted: <?= htmlspecialchars($submission['updated_at']) ?></div>
+                <?php elseif (!empty($submission['created_at'])): ?>
+                    <div class="meta">Submitted: <?= htmlspecialchars($submission['created_at']) ?></div>
+                <?php endif; ?>
+            </div>
 
-  <div style="text-align:center;margin-top:20px"><a href="student-dashboard.php" style="color:#64748b;text-decoration:none">&laquo; Back to Dashboard</a></div>
+            <!-- Per-question breakdown -->
+            <?php foreach ($per_question as $i => $pq): ?>
+                <div class="q">
+                    <div class="q-head">Q<?= $i + 1 ?>. <?= htmlspecialchars($pq['question']) ?> <span style="font-weight:600"> (<?= $pq['marks'] ?> mark<?= $pq['marks'] > 1 ? 's' : '' ?>)</span></div>
+
+                    <?php if (is_array($pq['options']) && count($pq['options'])): ?>
+                        <?php foreach ($pq['options'] as $optKey => $optText): ?>
+                            <?php
+                                $isStudent = ((string)$optKey === (string)$pq['student']);
+                                $isCorrectOpt = ($pq['correct'] !== null && (string)$optKey === (string)$pq['correct']);
+                                $cls = $isCorrectOpt ? 'correct' : ($isStudent && !$isCorrectOpt ? 'wrong' : '');
+                            ?>
+                            <div class="option">
+                                <span class="<?= $cls ?>"><?= htmlspecialchars($optKey) ?>. <?= htmlspecialchars($optText) ?></span>
+                                <?php if ($isStudent): ?><strong> &nbsp; ← Your answer</strong><?php endif; ?>
+                                <?php if ($isCorrectOpt): ?><strong> &nbsp; ← Correct answer</strong><?php endif; ?>
+                            </div>
+                        <?php endforeach; ?>
+                    <?php else: ?>
+                        <!-- No options (subjective) -->
+                        <div><strong>Your answer:</strong></div>
+                        <div style="background:#f8f8f8;color:#111;padding:10px;border-radius:6px;margin-top:8px;"><?= nl2br(htmlspecialchars((string)$pq['student'])) ?></div>
+                        <?php if ($pq['correct'] !== null): ?>
+                            <div style="margin-top:8px"><strong>Model answer (if available):</strong> <?= nl2br(htmlspecialchars((string)$pq['correct'])) ?></div>
+                        <?php endif; ?>
+                    <?php endif; ?>
+
+                    <div style="margin-top:8px">
+                        <?php if ($pq['is_correct'] === true): ?>
+                            <span class="correct">Correct</span> — awarded <?= $pq['marks'] ?> mark<?= $pq['marks'] > 1 ? 's' : '' ?>.
+                        <?php elseif ($pq['is_correct'] === false): ?>
+                            <span class="wrong">Incorrect</span> — awarded 0 marks.
+                        <?php else: ?>
+                            <span class="note">Not auto-graded (subjective)</span>
+                        <?php endif; ?>
+                    </div>
+                </div>
+            <?php endforeach; ?>
+
+            <a class="back" href="student-dashboard.php">&laquo; Back to Dashboard</a>
+        <?php endif; ?>
+    </div>
 </div>
 </body>
 </html>
