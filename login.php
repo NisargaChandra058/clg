@@ -4,9 +4,6 @@
  * Handles authentication for Admin, Student, Staff, HOD, and Principal.
  */
 
-// 1. INCLUDE SESSION CONFIG (Must be first)
-require_once 'session_config.php';
-
 session_start();
 error_reporting(E_ALL);
 ini_set('display_errors', 1);
@@ -14,30 +11,37 @@ ini_set('display_errors', 1);
 // Include your secure Neon database connection
 require_once __DIR__ . '/db.php';
 
-// Helper function for safe redirects
-function safe_redirect($url) {
-    session_write_close(); // Force session save before redirect
-    header("Location: $url");
-    exit;
-}
-
-// 2. Middleware: If already logged in, redirect based on role
+// 1. Middleware: If already logged in, redirect based on role
 if (isset($_SESSION['user_id']) && isset($_SESSION['role'])) {
     $role = $_SESSION['role'];
     switch ($role) {
-        case 'admin':     safe_redirect('admin-panel.php');
-        case 'student':   safe_redirect('student-dashboard.php');
-        case 'staff':     safe_redirect('staff-panel.php');
-        case 'HOD':       safe_redirect('hod-panel.php');
-        case 'principal': safe_redirect('principal-panel.php');
-        default:          safe_redirect('index.php'); // Send generic users to User Panel
+        case 'admin':
+            header('Location: admin-panel.php');
+            exit;
+        case 'student':
+            header('Location: student-dashboard.php');
+            exit;
+        case 'staff':
+            header('Location: staff-panel.php');
+            exit;
+        case 'HOD':
+            header('Location: hod-panel.php');
+            exit;
+        case 'principal':
+            header('Location: principal-panel.php');
+            exit;
+        default:
+            // If role is unknown, logout
+            session_destroy();
+            header('Location: login.php'); 
+            exit;
     }
 }
 
 $error = '';
 $email = '';
 
-// 3. Handle Login Form Submission INSIDE this file
+// 2. Handle Login Form Submission INSIDE this file
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $email = trim($_POST['email'] ?? '');
     $password = $_POST['password'] ?? '';
@@ -60,14 +64,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $_SESSION['role'] = $user['role'];
                 $_SESSION['name'] = $user['first_name'] . ' ' . $user['surname'];
 
-                // REDIRECT BASED ON ROLE
+                // 3. REDIRECT BASED ON ROLE
                 switch ($user['role']) {
-                    case 'admin':     safe_redirect('admin-panel.php');
-                    case 'student':   safe_redirect('student-dashboard.php');
-                    case 'staff':     safe_redirect('staff-panel.php');
-                    case 'HOD':       safe_redirect('hod-panel.php');
-                    case 'principal': safe_redirect('principal-panel.php');
-                    default:          safe_redirect('index.php'); // Generic User Panel
+                    case 'admin':
+                        header('Location: admin-panel.php');
+                        exit;
+                    case 'student':
+                        header('Location: student-dashboard.php');
+                        exit;
+                    case 'staff':
+                        header('Location: staff-panel.php');
+                        exit;
+                    case 'HOD':
+                        header('Location: hod-panel.php');
+                        exit;
+                    case 'principal':
+                        header('Location: principal-panel.php');
+                        exit;
+                    default:
+                        $_SESSION['error'] = "Login Successful, but your role is undefined.";
+                        session_destroy(); 
+                        header('Location: login.php');
+                        exit;
                 }
             } else {
                 $error = "Invalid email or password.";
