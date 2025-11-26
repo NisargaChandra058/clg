@@ -163,7 +163,7 @@ td{padding:14px;border-bottom:1px solid #e2e8f0;font-size:0.95rem}
             <td style="font-weight:600;color:#0f172a;"><?= htmlspecialchars($r['subject_name'] ?? 'General') ?></td>
             <td><?= htmlspecialchars($r['test_name'] ?? 'Untitled') ?></td>
             <td><span class="score-badge"><?= htmlspecialchars($r['marks'] ?? '0') ?> / <?= htmlspecialchars($r['max_marks'] ?? '0') ?></span></td>
-            <td class="date-text"><?= !empty($r['created_at']) ? htmlspecialchars(date('M d, Y', strtotime($r['created_at']))) : '' ?></td>
+            <td class="date-text"><?= !empty($r['created_at']) ? htmlspecialchars(date('M d, Y', strtotime($r['created_at']))) : 'N/A' ?></td>
           </tr>
         <?php endforeach; ?>
       </tbody>
