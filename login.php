@@ -1,44 +1,33 @@
 <?php
-/**
- * Universal Login Page (login.php)
- * Handles authentication for Admin, Student, Staff, HOD, and Principal.
- */
-
-// 1. INCLUDE SESSION CONFIG (Must be first)
 require_once 'session_config.php';
-
 session_start();
 error_reporting(E_ALL);
 ini_set('display_errors', 1);
-
-// Include your secure Neon database connection
 require_once __DIR__ . '/db.php';
 
-// Helper function for safe redirects
 function safe_redirect($url) {
-    session_write_close(); // Force session save before redirect
+    session_write_close();
     header("Location: $url");
     exit;
 }
 
-// 2. Middleware: If already logged in, redirect based on role
 if (isset($_SESSION['user_id']) && isset($_SESSION['role'])) {
-    $role = strtolower(trim($_SESSION['role'])); // Normalize role
+    $role = strtolower(trim($_SESSION['role']));
     switch ($role) {
-        case 'admin':     safe_redirect('admin-panel.php');
-        case 'student':   safe_redirect('student-dashboard.php');
-        case 'staff':     safe_redirect('staff-panel.php');
-        case 'hod':       safe_redirect('hod-panel.php');
+        case 'admin': safe_redirect('admin-panel.php');
+        case 'student': safe_redirect('student-dashboard.php');
+        case 'staff': safe_redirect('staff-panel.php');
+        case 'hod': safe_redirect('hod-panel.php');
         case 'principal': safe_redirect('principal-panel.php');
-        default:          safe_redirect('index.php'); // Send generic users to User Panel
+        default: safe_redirect('index.php');
     }
 }
 
 $error = '';
 $email = '';
 
-// 3. Handle Login Form Submission INSIDE this file
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    echo "<!-- DEBUG: POST received -->";
     $email = trim($_POST['email'] ?? '');
     $password = trim($_POST['password'] ?? '');
 
@@ -46,60 +35,42 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $error = "Please enter both email and password.";
     } else {
         try {
-            // Prepare SQL to find user by email
-            // fetching * to ensure we get 'branch', 'role', etc.
+            if (!$pdo) {
+                throw new Exception("Database connection failed.");
+            }
             $stmt = $pdo->prepare("SELECT * FROM users WHERE email = :email LIMIT 1");
             $stmt->execute(['email' => $email]);
             $user = $stmt->fetch(PDO::FETCH_ASSOC);
+            echo "<!-- DEBUG: User: " . json_encode($user) . " -->";
 
-            if ($user) {
-                // Debugging (Logs to server, not user screen)
-                error_log("Attempting login for: " . $email);
+            if ($user && password_verify($password, $user['password'])) {
+                session_regenerate_id(true);
+                $_SESSION['user_id'] = $user['id'];
+                $_SESSION['role'] = $user['role'];
+                $_SESSION['name'] = trim(($user['first_name'] ?? '') . ' ' . ($user['surname'] ?? ''));
+                $_SESSION['branch'] = $user['branch'] ?? 'N/A';
 
-                // Verify User and Password
-                // Note: 'password' column in DB is expected to be a hash
-                if (password_verify($password, $user['password'])) {
-                    
-                    // Login Success: Set Session Variables
-                    session_regenerate_id(true); // Security best practice
-                    $_SESSION['user_id'] = $user['id'];
-                    $_SESSION['role'] = $user['role'];
-                    // Combine names if available
-                    $_SESSION['name'] = trim(($user['first_name'] ?? '') . ' ' . ($user['surname'] ?? ''));
-                    // Store branch if available (from your snippet)
-                    $_SESSION['branch'] = $user['branch'] ?? 'N/A';
-
-                    error_log("Password VERIFIED for: " . $email);
-
-                    // Normalize role for switch case
-                    $role = strtolower(trim($user['role']));
-
-                    // REDIRECT BASED ON ROLE
-                    switch ($role) {
-                        case 'admin':     safe_redirect('admin-panel.php');
-                        case 'student':   safe_redirect('student-dashboard.php');
-                        case 'staff':     safe_redirect('staff-panel.php');
-                        case 'hod':       safe_redirect('hod-panel.php');
-                        case 'principal': safe_redirect('principal-panel.php');
-                        default:          
-                            // Fallback for generic users
-                            safe_redirect('index.php'); 
-                    }
-                } else {
-                    error_log("Password FAILED for: " . $email);
-                    $error = "Invalid email or password.";
+                $role = strtolower(trim($user['role']));
+                switch ($role) {
+                    case 'admin': safe_redirect('admin-panel.php');
+                    case 'student': safe_redirect('student-dashboard.php');
+                    case 'staff': safe_redirect('staff-panel.php');
+                    case 'hod': safe_redirect('hod-panel.php');
+                    case 'principal': safe_redirect('principal-panel.php');
+                    default: safe_redirect('index.php');
                 }
             } else {
-                error_log("User not found: " . $email);
                 $error = "Invalid email or password.";
             }
-        } catch (PDOException $e) {
-            error_log("Database error: " . $e->getMessage());
+        } catch (Exception $e) {
+            error_log("Login error: " . $e->getMessage());
             $error = "System Error: Please try again later.";
         }
     }
 }
 ?>
+<!-- Rest of your HTML remains the same -->
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -181,3 +152,4 @@ button.btn:hover { background-color: #2980b9; }
     </div>
 </body>
 </html>
+
