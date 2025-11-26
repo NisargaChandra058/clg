@@ -1,8 +1,10 @@
 <?php
+// TEMP: Enable for debugging - REMOVE IN PRODUCTION
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
+
 require_once 'session_config.php';
 session_start();
-
-// Remove in production: error_reporting(E_ALL); ini_set('display_errors', 1);
 
 // Function to handle role-based redirects
 function redirectByRole($role) {
@@ -37,7 +39,9 @@ function safe_redirect($url) {
     exit;
 }
 
-// Check if already logged in
+// TEMP DEBUG: Check if includes loaded
+echo "<!-- DEBUG: Includes loaded successfully -->";
+
 if (isset($_SESSION['user_id']) && isset($_SESSION['role'])) {
     redirectByRole($_SESSION['role']);
 }
@@ -46,6 +50,7 @@ $error = '';
 $email = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    echo "<!-- DEBUG: POST received -->";
     $email = trim($_POST['email'] ?? '');
     $password = trim($_POST['password'] ?? '');
 
@@ -62,6 +67,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $stmt = $pdo->prepare("SELECT id, password, role, first_name, surname, branch FROM users WHERE email = :email LIMIT 1");
             $stmt->execute(['email' => $email]);
             $user = $stmt->fetch(PDO::FETCH_ASSOC);
+            echo "<!-- DEBUG: User fetched: " . json_encode($user) . " -->";
 
             if ($user && password_verify($password, $user['password'])) {
                 session_regenerate_id(true);
@@ -81,4 +87,4 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 ?>
-<!-- Rest of HTML remains the same, but remove debug echoes -->
+<!-- Rest of your HTML remains the same -->
