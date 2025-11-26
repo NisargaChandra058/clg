@@ -23,7 +23,7 @@ error_reporting(E_ALL);
 ini_set('display_errors', '1');
 
 // require DB (aligned with dashboard/login; assumes db-config.php sets $conn)
-include('../db-config.php');  // Adjust path if db-config.php is elsewhere
+include('db-config.php');  // Fixed path: same directory as other files
 
 // Normalize role check
 $role = strtolower(trim((string)($_SESSION['role'] ?? '')));
