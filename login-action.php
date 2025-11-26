@@ -1,7 +1,7 @@
 <?php
 // Start session and include your PDO database connection
 session_start();
-require_once 'db.php';
+require_once 'db-config.php';
 
 // Enable error reporting for debugging
 error_reporting(E_ALL);
